@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, boundaries, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build shared packages
+        run: pnpm --filter @athlete/config --filter @athlete/contracts run build
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      # The architecture fitness check. A violated layer boundary fails the build.
+      - name: Architecture boundaries
+        run: pnpm run lint:boundaries
+
+      - name: Unit tests
+        run: pnpm --filter @athlete/api run test
+        env:
+          DATABASE_URL: postgres://unused:unused@localhost:5432/unused
+          SESSION_SECRET: ci-session-secret-at-least-32-characters
+
+      # Integration tests start a real Postgres via Testcontainers. The guarantees being
+      # asserted (RLS, exclusion constraints, composite FKs) exist in the database, so
+      # testing them against anything else would prove nothing.
+      - name: Integration tests (Testcontainers + real Postgres)
+        run: pnpm --filter @athlete/api run test:integration
+        env:
+          SESSION_SECRET: ci-session-secret-at-least-32-characters
+          DATABASE_URL: postgres://unused:unused@localhost:5432/unused
+
+  # Wiring check. Separate from `verify` because it exercises a different class of
+  # defect: the integration suite asserts database guarantees directly and cannot catch
+  # a middleware registered on a path that matches nothing, or a validator stricter than
+  # the column it guards. Both of those happened; this job is why they were found.
+  smoke:
+    name: End-to-end smoke (containerised stack)
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Start the stack
+        run: docker compose up -d --build
+        env:
+          COMPOSE_DOCKER_CLI_BUILD: 1
+
+      - name: Run migrations as their own step
+        run: docker compose run --rm migrate
+
+      - name: Wait for the API
+        run: |
+          for i in $(seq 1 40); do
+            curl -fsS http://localhost:3000/api/v1/health && exit 0
+            sleep 3
+          done
+          echo "API did not become healthy"; docker compose logs api; exit 1
+
+      - name: Smoke check
+        run: ./scripts/smoke.sh
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # Deployment shape, included to show the sequencing rather than to run here.
+  #
+  #  deploy:
+  #    needs: verify
+  #    environment: production        # manual approval gate
+  #    permissions:
+  #      id-token: write              # OIDC federated credential -- no stored secret
+  #    steps:
+  #      - azure/login@v2             # federated, no service-principal password
+  #      - build + push image to ACR
+  #      - run migrations as their OWN step, before the app deploy, never on container
+  #        start: two booting replicas would otherwise race the same migration
+  #      - deploy container app revision
+  #      - smoke check /api/v1/health, roll back the revision on failure

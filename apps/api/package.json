@@ -1,0 +1,40 @@
+{
+  "name": "@athlete/api",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/main.js",
+    "start:dev": "ts-node-dev --respawn src/main.ts",
+    "test": "vitest run --dir test unit route-coverage",
+    "test:integration": "vitest run --dir test integration",
+    "migrate": "ts-node src/db/migrate.ts"
+  },
+  "dependencies": {
+    "@athlete/config": "workspace:*",
+    "@athlete/contracts": "workspace:*",
+    "@nestjs/common": "^11.1.6",
+    "@nestjs/core": "^11.1.6",
+    "@nestjs/platform-express": "^11.1.6",
+    "drizzle-orm": "^0.44.5",
+    "pg": "^8.16.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^11.7.1",
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.15.5",
+    "testcontainers": "^11.7.1",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "@nestjs/testing": "^11.1.6",
+    "supertest": "^7.1.4",
+    "@types/supertest": "^6.0.3",
+    "@types/express": "^5.0.3"
+  }
+}

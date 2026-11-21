@@ -1,0 +1,20 @@
+{
+  "name": "athlete-platform",
+  "private": true,
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:integration": "pnpm --filter @athlete/api test:integration",
+    "lint:boundaries": "depcruise apps/api/src packages --config .dependency-cruiser.cjs"
+  },
+  "devDependencies": {
+    "dependency-cruiser": "^16.10.0",
+    "turbo": "^2.5.5",
+    "typescript": "^5.9.2"
+  }
+}
