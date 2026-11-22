@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { DatabaseService } from './database.service';
 
 /**
- * The privilege matrix of `0002_grants.sql`, restated: per table, the table-level
+ * The privilege matrix of `0002_grants.sql` and `0003_auth.sql`, restated: per table, the table-level
  * privileges the application role may hold and the columns it may UPDATE without one.
  *
  * Deliberately a second copy. The migration says what was granted; this says what the
@@ -23,6 +23,11 @@ export const PRIVILEGE_MATRIX: Readonly<
 > = {
   _migrations: { table: [], updatableColumns: [] },
   users: { table: [], updatableColumns: [] },
+  // better-auth's tables (0003_auth.sql): password hashes and session tokens. They
+  // belong to `athlete_auth`; the application role holds nothing on any of them.
+  auth_sessions: { table: [], updatableColumns: [] },
+  auth_accounts: { table: [], updatableColumns: [] },
+  auth_verifications: { table: [], updatableColumns: [] },
   academies: { table: ['SELECT'], updatableColumns: [] },
   user_academy_roles: { table: ['SELECT'], updatableColumns: [] },
   athletes: { table: READ_WRITE, updatableColumns: [] },

@@ -17,6 +17,8 @@ override_data {
       registry_login_server        = "athleteplatformacr.azurecr.io"
       api_identity_id              = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/athlete-dev-base-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/athlete-dev-api-id"
       migrate_identity_id          = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/athlete-dev-base-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/athlete-dev-migrate-id"
+      app_base_url                 = "https://athlete-dev-abcde.z01.azurefd.net"
+      auth_trusted_proxies         = ["147.243.0.0/16", "2a01:111:2050::/44"]
       api_secrets = {
         "database-url" = { env_name = "DATABASE_URL", key_vault_secret_id = "https://athletedevkvabcde.vault.azure.net/secrets/database-url" }
       }

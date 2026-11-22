@@ -67,6 +67,17 @@ resource "azurerm_container_app" "api" {
         name  = "PORT"
         value = tostring(local.port)
       }
+      # Not a secret: the public origin. The API refuses to boot without it.
+      env {
+        name  = "APP_BASE_URL"
+        value = var.app_base_url
+      }
+      # Not a secret: published address ranges. Empty would leave every sign-in in one
+      # shared rate-limit bucket, which is why the variable has no default.
+      env {
+        name  = "AUTH_TRUSTED_PROXIES"
+        value = join(",", var.trusted_proxies)
+      }
 
       dynamic "env" {
         for_each = var.api_secrets

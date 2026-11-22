@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { Pool } from 'pg';
-import { provisionAppRoleLogin, runMigrations } from '../../src/db/migrate';
+import { provisionRoleLogin, runMigrations } from '../../src/db/migrate';
 
 export interface TestDatabase {
   container: StartedPostgreSqlContainer;
@@ -15,6 +15,11 @@ export interface TestDatabase {
   adminPool: Pool;
   /** Connection string for the application role. */
   url: string;
+  /**
+   * Connection string for `athlete_auth`, the role better-auth connects as: identity
+   * and sessions, and nothing tenant-owned.
+   */
+  authUrl: string;
   /** Connection string for the superuser/owner: the one the API must refuse to start on. */
   adminUrl: string;
   stop: () => Promise<void>;
@@ -22,6 +27,8 @@ export interface TestDatabase {
 
 const APP_ROLE = 'athlete_app';
 const APP_ROLE_PASSWORD = 'app-role-test-password';
+const AUTH_ROLE = 'athlete_auth';
+const AUTH_ROLE_PASSWORD = 'auth-role-test-password';
 
 /**
  * Real Postgres, real migrations. These guarantees live in the database -- RLS
@@ -49,9 +56,12 @@ export async function startTestDatabase(): Promise<TestDatabase> {
   // The migration creates athlete_app as NOLOGIN, because production authenticates it
   // with a credential from Key Vault rather than one committed to a repository. Tests
   // grant it a local password so they can connect AS the application role.
-  await provisionAppRoleLogin(adminUrl, APP_ROLE_PASSWORD);
+  await provisionRoleLogin(adminUrl, APP_ROLE, APP_ROLE_PASSWORD);
+  await provisionRoleLogin(adminUrl, AUTH_ROLE, AUTH_ROLE_PASSWORD);
 
-  const url = `postgres://${APP_ROLE}:${APP_ROLE_PASSWORD}@${container.getHost()}:${container.getPort()}/${container.getDatabase()}`;
+  const address = `${container.getHost()}:${container.getPort()}/${container.getDatabase()}`;
+  const url = `postgres://${APP_ROLE}:${APP_ROLE_PASSWORD}@${address}`;
+  const authUrl = `postgres://${AUTH_ROLE}:${AUTH_ROLE_PASSWORD}@${address}`;
   const pool = new Pool({ connectionString: url, max: 5 });
 
   return {
@@ -59,6 +69,7 @@ export async function startTestDatabase(): Promise<TestDatabase> {
     pool,
     adminPool,
     url,
+    authUrl,
     adminUrl,
     stop: async () => {
       await pool.end();
@@ -123,7 +134,8 @@ export interface SeededAcademy {
  *
  * Runs as the superuser because the application role cannot do any of it: `athlete_app`
  * holds SELECT only on `academies` and `user_academy_roles`, and nothing on `users`
- * (0002_grants.sql).
+ * (0002_grants.sql). These users have no credential: a test that signs in creates its
+ * own through the operator CLI's `createUser`.
  * Onboarding is a platform operation, and the fixture is honest about that.
  */
 export async function seedAcademy(db: TestDatabase, name: string): Promise<SeededAcademy> {
@@ -131,11 +143,11 @@ export async function seedAcademy(db: TestDatabase, name: string): Promise<Seede
   const pool = db.adminPool;
 
   const admin = await pool.query(
-    `insert into users (email, password_hash, full_name) values ($1, 'x', $2) returning id`,
+    `insert into users (email, full_name) values ($1, $2) returning id`,
     [`admin+${academyId}@example.test`, `${name} Admin`],
   );
   const coach = await pool.query(
-    `insert into users (email, password_hash, full_name) values ($1, 'x', $2) returning id`,
+    `insert into users (email, full_name) values ($1, $2) returning id`,
     [`coach+${academyId}@example.test`, `${name} Coach`],
   );
   const adminUserId = admin.rows[0].id as string;
@@ -249,7 +261,7 @@ export async function seedTwoTeamAcademy(db: TestDatabase, name: string): Promis
   const { academyId, coachUserId } = academy;
 
   const lapsed = await db.adminPool.query(
-    `insert into users (email, password_hash, full_name) values ($1, 'x', $2) returning id`,
+    `insert into users (email, full_name) values ($1, $2) returning id`,
     [`lapsed+${academyId}@example.test`, `${name} Former Coach`],
   );
   const lapsedCoachUserId = lapsed.rows[0].id as string;

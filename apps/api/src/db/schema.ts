@@ -1,4 +1,5 @@
 import {
+  boolean,
   date,
   index,
   integer,
@@ -34,12 +35,20 @@ export const academies = pgTable('academies', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Identity only. The credential is not here: better-auth keeps password hashes in
+ * `auth_accounts`, and that table, `auth_sessions` and `auth_verifications` are
+ * deliberately NOT mirrored in this file -- nothing that goes through Drizzle (and so
+ * through the application role) may reach them. See 0003_auth.sql.
+ */
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').notNull(),
-  passwordHash: text('password_hash').notNull(),
   fullName: text('full_name').notNull(),
+  emailVerified: boolean('email_verified').notNull().default(false),
+  image: text('image'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const userAcademyRoles = pgTable(

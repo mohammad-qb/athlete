@@ -19,14 +19,14 @@ default scrypt stays), no second deployable beyond static files.
 
 | Phase | Name | Status |
 |---|---|---|
-| 1 | Cookie authentication (better-auth, `athlete_auth` role, `/me`) | not started |
+| 1 | Cookie authentication (better-auth, `athlete_auth` role, `/me`) | done |
 | 2 | API contract (response schemas, lists, new reads, OpenAPI, generated client) | not started |
 | 3 | Web foundation (shell, design system, sign-in, athletes list, e2e harness) | not started |
 | 4 | Admin screens (athlete create/edit + conflict dialog, teams) | not started |
 | 5 | Coach flow (sessions, phone attendance) + docs | not started |
 
-**Current phase:** none started.
-**Recommended next phase:** 1.
+**Current phase:** 1 done (2026-11-22, branch `feat/frontend-v1-phase-1`).
+**Recommended next phase:** 2.
 
 Phases are strictly sequential. Stop after phase 3 for the owner to look at the running UI
 before building more screens on it.
@@ -108,7 +108,8 @@ Facts about better-auth 1.7 established during planning (verify against the pinn
 docs before relying on any that is marked unverified):
 
 - It is **ESM-only**; the docs say CommonJS is unsupported. The API compiles to CommonJS
-  (`module: node16`). Unverified: that it loads from this build. Phase 1 starts by proving it.
+  (`module: node16`). Verified in phase 1: a dynamic `import()` loads it from the built
+  output, ts-node-dev and Vitest.
 - Express 5 mount: `app.all('/api/auth/*splat', toNodeHandler(auth))` from `better-auth/node`,
   registered **before** any body parser. In Nest that means `NestFactory.create(AppModule, {
   bodyParser: false })` and re-adding parsers afterwards.
@@ -125,8 +126,13 @@ docs before relying on any that is marked unverified):
 - Direct `auth.api.*` calls skip better-auth's origin checks.
 - Defaults: cookies httpOnly + SameSite=Lax, name `<prefix>.session_token`, sessions last 7
   days; `secret` must be 32+ characters; `baseURL` is trusted as an origin.
-- Unverified: whether `user.fields` / `session.fields` values and an additional field's
-  `fieldName` take SQL column names when a `pg.Pool` is passed directly (expected: yes).
+- Verified in phase 1: `user.fields` / `session.fields` values and an additional field's
+  `fieldName` take SQL column names when a `pg.Pool` is passed directly.
+- Found in phase 1: the origin check is **off by default when better-auth detects a test
+  environment**; set `advanced.disableOriginCheck: false` explicitly. Sign-in is rate
+  limited per client address, in memory, when `NODE_ENV=production`. A multi-address
+  `X-Forwarded-For` resolves to no address (one shared bucket for everyone) unless
+  `advanced.ipAddress.trustedProxies` names the proxies.
 
 ### API contract (settled)
 
@@ -303,13 +309,13 @@ with one academy, one admin and one coach for manual use, and document it in the
 
 ### Tasks
 
-- [ ] better-auth loads in built output, dev runner and Vitest (first; may block the phase)
-- [ ] `0003_auth.sql`, `athlete_auth` role, login provisioning, env and compose wiring
-- [ ] `createAuth`, auth module, session store, principal repository, async guard
-- [ ] `@Authenticated`, origin guard, `/me` and `/me/active-academy`, contracts
-- [ ] `user:create` CLI, `seed-dev.sh`, smoke script on cookies, token code removed
-- [ ] Tests listed below; route manifest regenerated
-- [ ] ADR `docs/adr/0006-cookie-sessions-and-the-auth-role.md` (session transport, separate
+- [x] better-auth loads in built output, dev runner and Vitest (first; may block the phase)
+- [x] `0003_auth.sql`, `athlete_auth` role, login provisioning, env and compose wiring
+- [x] `createAuth`, auth module, session store, principal repository, async guard
+- [x] `@Authenticated`, origin guard, `/me` and `/me/active-academy`, contracts
+- [x] `user:create` CLI, `seed-dev.sh`, smoke script on cookies, token code removed
+- [x] Tests listed below; route manifest regenerated
+- [x] ADR `docs/adr/0006-cookie-sessions-and-the-auth-role.md` (session transport, separate
       role, pg pool instead of the Drizzle adapter, active academy on the session, origin
       check, CLI-only accounts); correct `docs/01-technology-stack.md` §7 and the README's
       "not built" list where this phase makes them false
@@ -352,7 +358,67 @@ apps scripts` finds nothing. The Terraform CI job's commands still pass if Terra
 
 ### Deviations
 
-_None yet._
+- **A defect in `0001` fixed in `0003`, beyond the plan.** `app_academies_for_user()` is
+  SECURITY DEFINER and reads two tables under FORCE ROW LEVEL SECURITY, so with a
+  non-superuser owner (production) it returned no rows and every sign-in would have
+  resolved to "no academy". `0003_auth.sql` gives the migrating role a `SELECT` policy on
+  `user_academy_roles` and `academies`. New suite `auth.owner.integration.spec.ts` migrates
+  as a non-superuser and fails without it. **Owner to confirm** the concession: the schema
+  owner can now read role grants and academy names across tenants without a tenant key.
+- **The unverified better-auth facts all held**, with one addition: it loads from CommonJS by
+  dynamic `import()` in all three runtimes (ts-node-dev kept); `fieldName` and `fields` take
+  SQL column names with a `pg.Pool`. New fact: better-auth disables its origin check when it
+  detects a test environment, so `createAuth` sets `disableOriginCheck: false` and
+  `disableCSRFCheck: false` explicitly.
+- **`createAuth` also sets `autoSignIn: false` and `telemetry: { enabled: false }`.** The
+  first so the CLI leaves no session behind; the second for the data-residency rule.
+- **`PrincipalRepository.academiesFor(tx, userId)` takes the transaction**; the guard opens
+  it with `DatabaseService.runUnscoped`. A repository importing `database.service.ts` trips
+  the `no-repository-to-service` boundary, and `PrincipalScopeRepository` already follows
+  this shape.
+- **Files the plan did not name:** `auth.gateway.ts` (the API's two-method view of
+  better-auth: node handler, cookie to session), `auth.database.ts` (the `athlete_auth`
+  pool), `mount-auth.ts` (called from `main.ts`), `current-session.decorator.ts`
+  (`@CurrentSession()`), `me.service.ts` (controllers may not hold logic or reach a store).
+- **The guard forwards better-auth's `Set-Cookie`** from the session lookup (`returnHeaders`),
+  so a renewed session's cookie expiry reaches the browser. A direct `auth.api` call
+  otherwise drops it.
+- **`AuthorizationGuard` answers 403, not 401, to a signed-in user with no academy** on a
+  `@Permission` route: signing in again would not help.
+- **`permissions` in `MeResponse` is typed `PermissionAction`** (`Action` without `manage`),
+  exported from the contracts, so the wildcard cannot be reported.
+- **`MeService.switchAcademy` refuses with code `not_a_member`**, and `POST
+  /me/active-academy` answers 200 rather than Nest's default 201.
+- **The CLI needs only `DATABASE_URL`.** It signs nothing, so it uses a throwaway secret
+  instead of `SESSION_SECRET`. It sets the tenant key for the academy check and the role
+  grant, because a non-superuser owner is bound by RLS. It prints the user id on stdout.
+- **The CLI gives a password to a `users` row that has none.** "Adds the role grant only"
+  holds for an email that has a credential. A row from before this phase has none (the old
+  `seed-demo.sql` inserted users directly), and granting it a role would leave a person who
+  can never sign in. For such a row the password is required and is attached to the existing
+  id, by the library's own hash and `linkAccount`; `auth.session.integration` asserts it.
+- **`scripts/seed-demo.sql` no longer creates users or the coach assignment.** An account
+  needs a hash only better-auth writes, so `seed-dev.sh` runs the SQL, creates the two
+  accounts with the CLI, then inserts the assignment. `smoke.sh` calls `seed-dev.sh` and adds
+  Beta's administrator and a user in both academies.
+- **`smoke.sh` waits out better-auth's sign-in rate limit** (retry on 429) and asserts that a
+  burst is limited, instead of disabling it. Checks beyond the exit criteria: a successful
+  academy switch, `update-session` cannot move the tenant, sign-up is closed, the cookie is
+  httpOnly.
+- **Compose sets `APP_BASE_URL` to `http://localhost:${API_PORT:-3000}`**, so a stack on
+  another port still has a matching origin.
+- **Terraform:** a second generated password (`auth_role`), secrets `auth-database-url` (API)
+  and `auth-role-password` (migration job), per-secret reader assignments, a `base` output
+  `app_base_url` (custom domain or the Front Door host) and a container-app module variable
+  that passes it as `APP_BASE_URL`. `fmt`, `validate`, the mocked-provider tests and `tflint`
+  were run in containers and pass; nothing was planned or applied.
+- **`AUTH_TRUSTED_PROXIES` (review finding, owner's choice).** A new optional env var,
+  comma-separated IPs or CIDR ranges, passed to better-auth as `trustedProxies` so the
+  sign-in rate limit resolves a client address behind Front Door. Terraform fills it from
+  the `AzureFrontDoor.Backend` service tag. Empty locally and in compose.
+- **Docs corrected beyond the two the plan names:** `docs/02-architecture.md` and
+  `docs/03-data-model.md` (sentences about the token, `password_hash` and the lookup),
+  `infra/terraform/README.md`, the README's diagrams, test table and verified state.
 
 ---
 

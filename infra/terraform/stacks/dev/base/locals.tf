@@ -37,6 +37,7 @@ locals {
   secret_versions = {
     postgres_admin = 1
     app_role       = 1
+    auth_role      = 1
     session        = 1
   }
 }

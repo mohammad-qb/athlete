@@ -3,6 +3,7 @@ import type { Action, Subject } from '@athlete/contracts';
 
 export const PERMISSION_METADATA = 'athlete:permission';
 export const PUBLIC_METADATA = 'athlete:public';
+export const AUTHENTICATED_METADATA = 'athlete:authenticated';
 
 export interface PermissionSpec {
   action: Action;
@@ -25,3 +26,15 @@ export const Permission = (spec: PermissionSpec) => SetMetadata(PERMISSION_METAD
 
 /** The only way to opt a route out of authorization. Deliberately explicit and greppable. */
 export const Public = () => SetMetadata(PUBLIC_METADATA, true);
+
+/**
+ * For the few routes that are about the caller rather than about a resource: "who am
+ * I, and where may I act?". Any signed-in identity is admitted -- including one with no
+ * role in any academy, which is exactly who most needs that answer.
+ *
+ * It is not a weaker `@Permission`. Such a route has no `(action, subject)` to name,
+ * and inventing one would put a row in the policy that grants nothing real. A route
+ * declares exactly one of `@Public`, `@Authenticated` and `@Permission`; the guard and
+ * the route-coverage test both refuse any other count.
+ */
+export const Authenticated = () => SetMetadata(AUTHENTICATED_METADATA, true);

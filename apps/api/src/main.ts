@@ -1,17 +1,23 @@
 import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { loadEnv } from '@athlete/config';
 import { API_GLOBAL_PREFIX, AppModule } from './app.module';
 import { assertDatabasePrivileges } from './common/tenancy/database-privileges';
 import { DatabaseService } from './common/tenancy/database.service';
+import { mountAuth } from './modules/auth/mount-auth';
 
 async function bootstrap(): Promise<void> {
   const env = loadEnv();
-  const app = await NestFactory.create(AppModule, { bodyParser: true });
+  // No body parser yet: better-auth must see its requests unparsed. `mountAuth`
+  // registers its routes and then adds the parsers back for ours.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
+  mountAuth(app);
 
-  // ETag is only useful to a browser client if it is allowed to read it.
-  app.enableCors({ exposedHeaders: ['ETag'] });
+  // No CORS: the SPA is served from the same origin as the API (Front Door routes
+  // /api/* here), so there is no cross-origin caller to allow -- and a same-origin
+  // script can already read ETag.
   app.setGlobalPrefix(API_GLOBAL_PREFIX);
 
   // Before accepting a single request: are we connected as the constrained application

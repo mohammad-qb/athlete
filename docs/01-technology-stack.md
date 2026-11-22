@@ -171,10 +171,12 @@ confirmed rather than assumed:
   formality. **Lucia**, the library this paragraph would have named two years ago, was
   deprecated as a library by its author in 2025 and now exists as a guide to writing
   sessions yourself. A dead dependency in a technology proposal is worse than no name.
-- **Its tables live in our Postgres**, through its Drizzle adapter, created by our own
-  hand-written migrations like every other table. Sessions are database rows, not
-  self-contained JWTs, so a session can be revoked and "sign out everywhere" is a
-  `DELETE`.
+- **Its tables live in our Postgres**, created by our own hand-written migrations like
+  every other table (`0003_auth.sql`). It is handed a `pg` pool and uses its built-in
+  query layer, **not its Drizzle adapter**: the adapter needs a newer `drizzle-orm`
+  than the API runs, and the auth tables are deliberately kept out of the schema the
+  application's queries are built from. Sessions are database rows, not self-contained
+  JWTs, so a session can be revoked and "sign out everywhere" is a `DELETE`.
 - **Password hashing is scrypt by default**, not argon2id. Both are memory-hard and
   acceptable; argon2id is the current OWASP first choice and is available by supplying
   the library's hash and verify functions. An earlier draft of this proposal said
@@ -193,13 +195,29 @@ data migration out of someone else's service.
 **What is deliberately not built:** SSO, social login and SCIM, because no requirement
 asks for them.
 
-**Not integrated in this repository.** The slice verifies a signed token and builds a
-principal; it stores no credential and manages no session (see the README's "not
-built" list). Integration has one known piece of design left: the application role
-`athlete_app` holds no privilege on `users` at all
-([ADR 0004](./adr/0004-privilege-matrix-and-voiding.md)), so the auth library needs
-either its own database role or a narrow, explicit grant. That is a decision to make
-when it is wired in, not one this proposal pretends is already made.
+**Integrated**, pinned at 1.7.27
+([ADR 0006](./adr/0006-cookie-sessions-and-the-auth-role.md)). A person signs in at
+`/api/auth/sign-in/email` and receives an httpOnly, SameSite=Lax cookie naming a
+session row; the HMAC bearer token the slice used before is gone. The open question
+this section used to end on is settled the stricter way: `athlete_app` still holds
+nothing on `users` ([ADR 0004](./adr/0004-privilege-matrix-and-voiding.md)), and
+better-auth connects as a second role, `athlete_auth`, which holds identity and
+sessions and nothing tenant-owned. Three things it does not do by itself are ours: the
+academy a session acts in is a column only the server writes, roles are read from the
+database on every request rather than kept in the session, and state-changing requests
+to our own routes are origin-checked.
+
+Two facts about the library that the integration turned up, recorded because both are
+the kind a proposal gets wrong by assuming. **It is ESM-only** and this API compiles to
+CommonJS; it is loaded with a dynamic `import()`, which works in the built image, the
+dev runner and Vitest, and the API's module format did not have to change. **It
+switches its origin check off when it detects a test environment**, so the
+configuration states the check explicitly: otherwise the suite would exercise a more
+permissive library than the one deployed.
+
+**What v1 leaves out:** accounts are created by an operator CLI, not by sign-up or
+invitation, and there is no password reset by email, no email verification and no
+TOTP. Each needs outbound email or a requirement that does not exist yet.
 
 **AWS Cognito** — would keep residency if available in-region, but has poor developer
 experience and hard-couples to AWS. **Keycloak** — full OIDC in-country, but an entire

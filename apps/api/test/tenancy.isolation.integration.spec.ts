@@ -105,8 +105,7 @@ describe('tenant isolation', () => {
     // role assignments only, never domain data.
     // Provisioned as the platform: the application role cannot create users or grants.
     const sharedUser = await db.adminPool.query(
-      `insert into users (email, password_hash, full_name)
-       values ($1, 'x', 'Shared Coach') returning id`,
+      `insert into users (email, full_name) values ($1, 'Shared Coach') returning id`,
       [`shared+${randomUUID()}@example.test`],
     );
     const userId = sharedUser.rows[0].id as string;
@@ -121,5 +120,11 @@ describe('tenant isolation', () => {
     const { rows } = await db.pool.query('select * from app_academies_for_user($1)', [userId]);
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.role)).toEqual(['coach', 'coach']);
+    // Academy names, so the client can offer "which academy?" -- and nothing more.
+    expect(Object.keys(rows[0]).sort()).toEqual(['academy_id', 'academy_name', 'role']);
+    expect(rows.map((r) => r.academy_name).sort()).toEqual([
+      'Abu Dhabi Oryx Academy',
+      'Dubai Falcons Academy',
+    ]);
   });
 });

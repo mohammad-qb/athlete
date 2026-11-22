@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PrincipalScopeRepository } from '../src/common/authz/principal-scope.repository';
 import { assertDatabasePrivileges } from '../src/common/tenancy/database-privileges';
@@ -311,7 +312,7 @@ describe('database privilege matrix', () => {
     it('cannot create a user or an academy', async () => {
       await expect(
         db.pool.query(
-          `insert into users (email, password_hash, full_name) values ('x@example.test', 'x', 'X')`,
+          `insert into users (email, full_name) values ('x@example.test', 'X')`,
         ),
       ).rejects.toThrow(/permission denied for table users/i);
 
@@ -321,6 +322,109 @@ describe('database privilege matrix', () => {
           client.query(`insert into academies (id, name) values ($1, 'Self-made')`, [id]),
         ),
       ).rejects.toThrow(/permission denied for table academies/i);
+    });
+  });
+
+  describe('credentials and sessions', () => {
+    const AUTH_TABLES = ['auth_sessions', 'auth_accounts', 'auth_verifications'] as const;
+    const ALL_TABLES = [
+      '_migrations',
+      'academies',
+      'assessments',
+      'athletes',
+      'auth_accounts',
+      'auth_sessions',
+      'auth_verifications',
+      'session_participants',
+      'team_coach_assignments',
+      'team_memberships',
+      'teams',
+      'training_sessions',
+      'user_academy_roles',
+      'users',
+    ];
+
+    it.each(AUTH_TABLES)('the application role cannot read %s', async (table) => {
+      await expect(db.pool.query(`select * from ${table}`)).rejects.toThrow(
+        new RegExp(`permission denied for table ${table}`, 'i'),
+      );
+    });
+
+    it('the list of tables below is the whole schema, so no table escapes the next assertion', async () => {
+      const { rows } = await db.adminPool.query<{ relname: string }>(
+        `select relname from pg_class
+         where relnamespace = 'public'::regnamespace and relkind = 'r' order by relname`,
+      );
+      expect(rows.map((row) => row.relname)).toEqual(ALL_TABLES);
+    });
+
+    it('the auth role holds identity and sessions, and exactly that', async () => {
+      // Every privilege kind on every table, as the database reports it for the role.
+      const { rows } = await db.adminPool.query<{ held: string }>(
+        `select c.relname || ':' || p.privilege as held
+         from pg_class c
+         cross join unnest(array['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER','MAINTAIN']) as p(privilege)
+         where c.relnamespace = 'public'::regnamespace and c.relkind = 'r'
+           and has_table_privilege('athlete_auth', c.oid, p.privilege)
+         order by 1`,
+      );
+      expect(rows.map((row) => row.held)).toEqual(
+        [
+          ...AUTH_TABLES.flatMap((table) =>
+            ['SELECT', 'INSERT', 'UPDATE', 'DELETE'].map((privilege) => `${table}:${privilege}`),
+          ),
+          'users:SELECT',
+          'users:INSERT',
+          'users:UPDATE',
+        ].sort(),
+      );
+
+      // ...and nothing granted column by column, which has_table_privilege cannot see.
+      const columns = await db.adminPool.query(
+        `select 1 from information_schema.column_privileges
+         where grantee = 'athlete_auth' and table_schema = 'public'
+           and (table_name, privilege_type) not in (
+             select table_name, privilege_type from information_schema.table_privileges
+             where grantee = 'athlete_auth' and table_schema = 'public'
+           )`,
+      );
+      expect(columns.rowCount).toBe(0);
+
+      const role = await db.adminPool.query(
+        `select rolsuper, rolbypassrls, rolcreaterole, rolcreatedb from pg_roles where rolname = 'athlete_auth'`,
+      );
+      expect(role.rows[0]).toEqual({
+        rolsuper: false,
+        rolbypassrls: false,
+        rolcreaterole: false,
+        rolcreatedb: false,
+      });
+    });
+
+    it('the auth role cannot read an athlete, a role grant, or the cross-tenant lookup', async () => {
+      const authPool = new Pool({ connectionString: db.authUrl, max: 1 });
+      try {
+        await expect(authPool.query('select * from athletes')).rejects.toThrow(
+          /permission denied for table athletes/i,
+        );
+        await expect(authPool.query('select * from user_academy_roles')).rejects.toThrow(
+          /permission denied for table user_academy_roles/i,
+        );
+        await expect(
+          authPool.query('select * from app_academies_for_user($1)', [academy.coachUserId]),
+        ).rejects.toThrow(/permission denied for function app_academies_for_user/i);
+        // What it is for.
+        await expect(authPool.query('select id from users limit 1')).resolves.toBeDefined();
+      } finally {
+        await authPool.end();
+      }
+    });
+
+    it('the cross-tenant lookup is still the only SECURITY DEFINER function', async () => {
+      const { rows } = await db.adminPool.query<{ proname: string }>(
+        `select proname from pg_proc where pronamespace = 'public'::regnamespace and prosecdef`,
+      );
+      expect(rows.map((row) => row.proname)).toEqual(['app_academies_for_user']);
     });
   });
 
@@ -363,7 +467,9 @@ describe('database privilege matrix', () => {
     it.each([
       ['grant delete on assessments to athlete_app', /DELETE on assessments/],
       ['grant update (status) on session_participants to athlete_app', /UPDATE \(status\) on session_participants/],
-      ['grant select (password_hash) on users to athlete_app', /SELECT \(password_hash\) on users/],
+      ['grant select (email) on users to athlete_app', /SELECT \(email\) on users/],
+      ['grant select on auth_sessions to athlete_app', /SELECT on auth_sessions/],
+      ['grant select (password) on auth_accounts to athlete_app', /SELECT \(password\) on auth_accounts/],
       // has_table_privilege is false for a column-only grant, yet this one mints authority.
       [
         'grant insert (academy_id, user_id, role) on user_academy_roles to athlete_app',

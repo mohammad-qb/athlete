@@ -66,7 +66,27 @@ resource "azurerm_key_vault_secret" "database_url" {
   }
 }
 
-# Read by: the API.
+# Read by: the API, and used by better-auth alone.
+resource "azurerm_key_vault_secret" "auth_database_url" {
+  name         = "auth-database-url"
+  key_vault_id = azurerm_key_vault.main.id
+  # The auth role: users, sessions and password hashes, and nothing tenant-owned. A
+  # second role rather than a wider `athlete_app`, so a statement running as the
+  # application role still cannot read a credential.
+  value_wo = format(
+    "postgres://athlete_auth:%s@%s:5432/%s?sslmode=require",
+    ephemeral.random_password.auth_role.result, local.database_host, local.database_name,
+  )
+  value_wo_version = local.secret_versions.auth_role
+
+  depends_on = [azurerm_role_assignment.operators_key_vault]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# Read by: the API. better-auth signs session cookies with it.
 resource "azurerm_key_vault_secret" "session_secret" {
   name             = "session-secret"
   key_vault_id     = azurerm_key_vault.main.id
@@ -125,6 +145,21 @@ resource "azurerm_key_vault_secret" "app_role_password" {
   key_vault_id     = azurerm_key_vault.main.id
   value_wo         = ephemeral.random_password.app_role.result
   value_wo_version = local.secret_versions.app_role
+
+  depends_on = [azurerm_role_assignment.operators_key_vault]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# Read by: the migration job only. Likewise for `athlete_auth` and AUTH_ROLE_PASSWORD;
+# the same value is embedded in auth-database-url above.
+resource "azurerm_key_vault_secret" "auth_role_password" {
+  name             = "auth-role-password"
+  key_vault_id     = azurerm_key_vault.main.id
+  value_wo         = ephemeral.random_password.auth_role.result
+  value_wo_version = local.secret_versions.auth_role
 
   depends_on = [azurerm_role_assignment.operators_key_vault]
 

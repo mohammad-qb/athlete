@@ -11,6 +11,13 @@ ephemeral "random_password" "app_role" {
   special = false
 }
 
+# `athlete_auth`: the role better-auth connects as. Its own password, so that rotating
+# one service role's credential never touches the other.
+ephemeral "random_password" "auth_role" {
+  length  = 48
+  special = false
+}
+
 module "postgres" {
   source = "../../../modules/postgres"
 
