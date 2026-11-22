@@ -5,6 +5,7 @@ import { CommonModule } from './common/common.module';
 import { AuthorizationGuard } from './common/authz/authorization.guard';
 import { OriginGuard } from './common/http/origin.guard';
 import { TenantTransactionInterceptor } from './common/tenancy/tenant-transaction.interceptor';
+import { ResponseInterceptor } from './common/validation/response.interceptor';
 import { ValidationInterceptor } from './common/validation/validation.interceptor';
 import { AuthModule } from './modules/auth/auth.module';
 import { AuthenticationGuard } from './modules/auth/authentication.guard';
@@ -40,6 +41,9 @@ export const API_GLOBAL_PREFIX = 'api/v1';
     { provide: APP_INTERCEPTOR, useClass: ValidationInterceptor },
     // Every authenticated request runs inside a tenant-scoped transaction.
     { provide: APP_INTERCEPTOR, useClass: TenantTransactionInterceptor },
+    // Last, so innermost: every result is encoded through the schema its route declared
+    // with @Responds, inside the transaction -- a result that does not fit rolls it back.
+    { provide: APP_INTERCEPTOR, useClass: ResponseInterceptor },
 
     // One error contract, three normalisers. Nest REVERSES the global filter list and
     // takes the first @Catch metadata match, so the LAST registered filter is tried

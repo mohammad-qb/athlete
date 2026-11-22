@@ -20,13 +20,13 @@ default scrypt stays), no second deployable beyond static files.
 | Phase | Name | Status |
 |---|---|---|
 | 1 | Cookie authentication (better-auth, `athlete_auth` role, `/me`) | done |
-| 2 | API contract (response schemas, lists, new reads, OpenAPI, generated client) | not started |
+| 2 | API contract (response schemas, lists, new reads, OpenAPI, generated client) | done |
 | 3 | Web foundation (shell, design system, sign-in, athletes list, e2e harness) | not started |
 | 4 | Admin screens (athlete create/edit + conflict dialog, teams) | not started |
 | 5 | Coach flow (sessions, phone attendance) + docs | not started |
 
-**Current phase:** 1 done (2026-11-22, branch `feat/frontend-v1-phase-1`).
-**Recommended next phase:** 2.
+**Current phase:** 2 done (2026-11-22, branch `feat/frontend-v1-phase-2`).
+**Recommended next phase:** 3.
 
 Phases are strictly sequential. Stop after phase 3 for the owner to look at the running UI
 before building more screens on it.
@@ -485,12 +485,12 @@ the committed generated output, and scripts `generate` and `typecheck`. No Vite 
 
 ### Tasks
 
-- [ ] `@Responds`, encoding interceptor, coverage rule, manifest column
-- [ ] Response schemas and ids across `packages/contracts`
-- [ ] List contract; `GET /athletes` paginated; four new read routes with scoped totals
-- [ ] OpenAPI generator, committed document, drift spec
-- [ ] `@athlete/web` package with generated client, CI drift step
-- [ ] `smoke.sh` updated for the paginated shape and the new routes; README counts updated
+- [x] `@Responds`, encoding interceptor, coverage rule, manifest column
+- [x] Response schemas and ids across `packages/contracts`
+- [x] List contract; `GET /athletes` paginated; four new read routes with scoped totals
+- [x] OpenAPI generator, committed document, drift spec
+- [x] `@athlete/web` package with generated client, CI drift step
+- [x] `smoke.sh` updated for the paginated shape and the new routes; README counts updated
 
 ### Tests to add or change
 
@@ -518,7 +518,60 @@ All pass. `docs/reference/route-manifest.md` lists the new routes with a respons
 
 ### Deviations
 
-_None yet._
+- **A route with no `@Responds` is refused at runtime, before its handler runs** (500,
+  `response_not_declared`), as well as failing the coverage spec. The plan asked only for
+  the spec; this is the same fail-closed rule `@Validate` already has.
+- **`@Responds` owns the status and the ETag.** `{ status }` is applied to the route
+  (`HttpCode`) as well as documented, replacing `@HttpCode(200)` on `/me/active-academy`.
+  `{ etag: true }` makes the interceptor send the encoded body's `version` as `ETag`, so
+  controllers no longer touch `@Res`. `@Responds(null)` is the 204 form. It is
+  handler-level only.
+- **New `@IfMatch()` parameter decorator** (`common/http/if-match.decorator.ts`) replaces
+  `@Headers('if-match')` + `parseIfMatch` in the controller. The route walk recognises it,
+  which is how the document knows where `If-Match` is required without a second list.
+- **The encoding interceptor is registered last (innermost)**, so a contract violation is
+  thrown inside the tenant transaction and rolls the write back.
+- **`GET /sessions` has no `q`.** The plan's table lists none and a session has nothing to
+  search; `SessionListQuery` omits it, so `?q=` is a 400 instead of an ignored parameter.
+  `from`/`to` are the half-open period `[from, to)` over `startsAt`.
+- **`GET /teams/:id` and `GET /sessions/:id` answer 404 outside scope** (as the plan's
+  tests ask), where `GET /athletes/:id` answers 403. A coach with no current team gets
+  403 `AUTHZ_NO_GRANT` on all of them, lists included, as before.
+- **Handlers renamed** so operation ids read well: `TeamsController.createTeam` is now
+  `create`. Operation ids are `<controller>_<handler>` with the `Controller` suffix
+  dropped and a lower-case first letter (`athletes_list`, `me_switchAcademy`).
+- **Error statuses in the document are derived, and err towards listing one.** 400 when
+  the route validates or takes `If-Match`; 401 and 403 unless `@Public`; 404 when it names
+  a row by path parameter or body; 409 when it writes.
+- **Response objects are published open.** Zod marks every object `additionalProperties:
+  false` on the output side; the generator removes that for non-strict objects, matching
+  the contracts' rule that a response may gain a field. Request objects stay closed.
+- **Schemas beyond the routes' own got ids too:** `Role`, `AttendanceStatus`, `Subject`,
+  `PermissionAction`, `ErrorType`. New contract files `errors.ts` (`ErrorResponse`,
+  `ErrorType`, `FieldError`, `ValidationErrorMeta`) and `health.ts`. The API's
+  `ApiErrorType` and `ApiErrorResponse` are now tied to them by type. `FieldError` and
+  `ValidationErrorMeta` are exported for the web error mapper but are not in
+  `openapi.json`: `meta` is an open record there, since its shape depends on `code`.
+- **Files the plan did not name:** `src/openapi/routes.ts` (the walk) and
+  `src/openapi/document.ts` (the generator); `common/db/listing.ts` (order by, LIKE
+  escaping, page window); `common/validation/response.interceptor.ts`. Specs:
+  `openapi.document.unit`, `response.http` (added to the `test` script's filter),
+  `contracts.lists.unit`, `lists.pagination.integration`.
+- **No generator CLI.** The document is written by the drift spec under `UPDATE_OPENAPI=1`,
+  as the plan's convention says; there is no separate script.
+- **New dev dependency `@seriousme/openapi-schema-validator`** (API), for the "validates
+  as OpenAPI 3.1" test. ESM-only, loaded by dynamic `import()` like better-auth.
+- **hey-api 0.99.0 as planned;** its fetch client is generated into the output folder, so
+  `@athlete/web` has one runtime dependency, `@tanstack/react-query`. It needs Node
+  >= 22.18, so the root `engines.node` moved from `>=22.12.0` to `>=22.18.0`.
+- **The CI step diffs the client only**, as the plan words it. `openapi.json` drift is
+  caught one step earlier by the unit tests.
+- **The sessions contract comment no longer mentions an `Idempotency-Key` header**, which
+  the API never had. `docs/01` §5 still names it as a REST mechanic; left for phase 5.
+- **Docs corrected in this phase** (sentences this phase made false): `README.md` (counts,
+  smoke listing, test table, "not built", layout), `docs/01` §10, `docs/02`
+  (cross-cutting table), `docs/03` §4 (routes, lists, responses), `docs/06` (next steps),
+  `apps/web/README.md`.
 
 ---
 

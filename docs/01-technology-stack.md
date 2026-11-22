@@ -280,7 +280,9 @@ where the definition lives and what it drags with it, not about expressiveness.
 introspection are given up. Validation is instead a declared route property
 (`@Validate`) read by one global interceptor, which fails closed when a route forgets
 it ([02](./02-architecture.md#cross-cutting-concerns-and-where-each-one-lives)), and
-the OpenAPI document is to be generated from the same Zod schemas.
+the OpenAPI document is generated from the same Zod schemas and the routes' own
+declarations (`apps/api/src/openapi/`), committed as `apps/api/openapi.json` and checked
+for drift by a test.
 
 ### Test runner — Vitest, not Jest
 

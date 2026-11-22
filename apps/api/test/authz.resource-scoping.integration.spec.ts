@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { NotFoundException } from '@nestjs/common';
-import type { Role } from '@athlete/contracts';
+import { AthleteListQuery, type Role } from '@athlete/contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { defineAbility } from '../src/common/authz/ability';
 import type { Principal } from '../src/common/authz/principal';
@@ -75,6 +75,9 @@ describe('resource scoping within an academy', () => {
       return requestContext.run({ ...who, ...scope, ability, tx, requestId: randomUUID() }, fn);
     });
 
+  /** The list route's query as an empty query string parses: first page, default sort. */
+  const firstPage = AthleteListQuery.parse({});
+
   const outOfScope = { type: 'FORBIDDEN', code: 'AUTHZ_OUT_OF_SCOPE' };
   const noGrant = { type: 'FORBIDDEN', code: 'AUTHZ_NO_GRANT' };
 
@@ -115,8 +118,10 @@ describe('resource scoping within an academy', () => {
 
   describe('a coach', () => {
     it('lists only the athletes on the team they coach now', async () => {
-      const listed = await as(coach(), () => athletes.list());
-      expect(listed.map((a) => a.id)).toEqual([academy.athleteOnA]);
+      const listed = await as(coach(), () => athletes.list(firstPage));
+      expect(listed.items.map((a) => a.id)).toEqual([academy.athleteOnA]);
+      // Counted under the same filter: the academy has two athletes, the coach has one.
+      expect(listed.total).toBe(1);
     });
 
     it('reads their own athlete and is refused another team\'s', async () => {
@@ -202,7 +207,7 @@ describe('resource scoping within an academy', () => {
     });
 
     it('with no current team at all is told so, not shown an empty list', async () => {
-      await expect(as(lapsedCoach(), () => athletes.list())).rejects.toMatchObject(noGrant);
+      await expect(as(lapsedCoach(), () => athletes.list(firstPage))).rejects.toMatchObject(noGrant);
       await expect(
         as(lapsedCoach(), () => teams.rosterAt(academy.teamB, new Date())),
       ).rejects.toMatchObject({ type: 'FORBIDDEN' });
@@ -214,8 +219,9 @@ describe('resource scoping within an academy', () => {
 
   describe('an academy administrator', () => {
     it('sees every athlete, roster and register in the academy', async () => {
-      const listed = await as(admin(), () => athletes.list());
-      expect(listed.map((a) => a.id).sort()).toEqual(
+      const listed = await as(admin(), () => athletes.list(firstPage));
+      expect(listed.total).toBe(2);
+      expect(listed.items.map((a) => a.id).sort()).toEqual(
         [academy.athleteOnA, academy.athleteOnB].sort(),
       );
 
@@ -229,7 +235,7 @@ describe('resource scoping within an academy', () => {
 
   describe('across academies', () => {
     it('nothing is reachable, even for an administrator of the other academy', async () => {
-      expect(await as(otherAdmin(), () => athletes.list())).toEqual([]);
+      expect(await as(otherAdmin(), () => athletes.list(firstPage))).toMatchObject({ items: [], total: 0 });
 
       const attempts: (() => Promise<unknown>)[] = [
         () => athletes.getById(academy.athleteOnA),
@@ -251,7 +257,9 @@ describe('resource scoping within an academy', () => {
       await as(coach(), async () => {
         const read = athletesRepo.accessFilter('read');
         expect(await athletesRepo.findById(academy.athleteOnB, read)).toBeUndefined();
-        expect((await athletesRepo.list(read)).map((a) => a.id)).toEqual([academy.athleteOnA]);
+        const page = await athletesRepo.page(firstPage, read);
+        expect(page.rows.map((a) => a.id)).toEqual([academy.athleteOnA]);
+        expect(page.total).toBe(1);
         expect(
           await athletesRepo.updateIfVersionMatches(
             academy.athleteOnB,

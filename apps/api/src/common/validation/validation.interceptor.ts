@@ -7,6 +7,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import type { Observable } from 'rxjs';
 import type { ZodError } from 'zod';
+import type { FieldError } from '@athlete/contracts';
 import { ApiError, ApiErrorType } from '../errors/api.error';
 import {
   VALIDATE_METADATA,
@@ -17,14 +18,8 @@ import {
   type ValidationSpec,
 } from './validate.decorator';
 
-/** One entry of `meta.fields` in a validation failure. */
-export interface FieldError {
-  /** Which part of the request the field is in. */
-  in: ValidationSlot;
-  /** Dot path from the root of that part; empty when the part itself is wrong. */
-  path: string;
-  messages: string[];
-}
+/** One entry of `meta.fields` in a validation failure; the shape is the contract's. */
+export type { FieldError };
 
 /**
  * Parses a route's declared input before the handler runs.

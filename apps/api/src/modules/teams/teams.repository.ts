@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq, isNull, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
-import type { Action } from '@athlete/contracts';
+import { and, count, eq, ilike, isNull, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import type { Action, TeamListQuery } from '@athlete/contracts';
 import { athletes, teamMemberships, teams } from '../../db/schema';
 import type { SubjectRows } from '../../common/authz/ability';
 import { accessibleBy } from '../../common/authz/accessible-by';
 import { isActive } from '../../common/db/active-row';
+import { containsPattern, orderBy, pageWindow } from '../../common/db/listing';
 import { requestContext } from '../../common/tenancy/request-context';
 
 export type TeamRow = typeof teams.$inferSelect;
@@ -15,6 +16,9 @@ const COLUMNS = {
   teams: { id: teams.id },
   teamMemberships: { teamId: teamMemberships.teamId },
 } satisfies { [S in 'teams' | 'teamMemberships']: Record<keyof SubjectRows[S], AnyColumn> };
+
+/** What `?sort=` may name, and the column each name orders by. */
+const TEAM_SORT_COLUMNS = { name: teams.name } satisfies Record<string, AnyColumn>;
 
 /**
  * Reads take a REQUIRED `access` predicate, as in `AthletesRepository`: the principal's
@@ -44,6 +48,35 @@ export class TeamsRepository {
       .returning();
     if (!row) throw new Error('Insert returned no row');
     return row;
+  }
+
+  /**
+   * One page of teams and the size of the result it is a page of. `total` is counted
+   * with the same predicate, access filter included: a coach's total is the number of
+   * teams they coach, never the number the academy has.
+   */
+  async pageOfTeams(
+    query: TeamListQuery,
+    access: SQL | undefined,
+  ): Promise<{ rows: TeamRow[]; total: number }> {
+    const { tx, academyId } = this.ctx();
+    const where = and(
+      eq(teams.academyId, academyId),
+      access,
+      query.q ? ilike(teams.name, containsPattern(query.q)) : undefined,
+    );
+    const { limit, offset } = pageWindow(query);
+
+    const rows = await tx
+      .select()
+      .from(teams)
+      .where(where)
+      .orderBy(...orderBy(TEAM_SORT_COLUMNS, query.sort, teams.id))
+      .limit(limit)
+      .offset(offset);
+    const [counted] = await tx.select({ total: count() }).from(teams).where(where);
+
+    return { rows, total: counted?.total ?? 0 };
   }
 
   async findTeam(id: string, access: SQL | undefined): Promise<TeamRow | undefined> {

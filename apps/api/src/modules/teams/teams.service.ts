@@ -3,8 +3,12 @@ import type {
   CreateMembershipRequest,
   CreateTeamRequest,
   MembershipResponse,
+  RosterResponse,
+  TeamListQuery,
+  TeamPage,
   TeamResponse,
   TransferAthleteRequest,
+  TransferResponse,
 } from '@athlete/contracts';
 import { TeamsRepository, type MembershipRow, type TeamRow } from './teams.repository';
 import { assertCan } from '../../common/authz/assert-can';
@@ -15,6 +19,24 @@ export class TeamsService {
 
   async createTeam(input: CreateTeamRequest): Promise<TeamResponse> {
     return toTeamResponse(await this.repository.createTeam(input));
+  }
+
+  /**
+   * An administrator's list is every team in the academy; a coach's is the teams they
+   * coach now, with a `total` counted under the same filter. A coach with no current
+   * team is refused by `accessFilter` rather than shown an empty page.
+   */
+  async listTeams(query: TeamListQuery): Promise<TeamPage> {
+    const { rows, total } = await this.repository.pageOfTeams(
+      query,
+      this.repository.accessFilter('read', 'teams'),
+    );
+    return { items: rows.map(toTeamResponse), total, page: query.page, pageSize: query.pageSize };
+  }
+
+  /** A team outside the principal's scope is indistinguishable from one that is not there. */
+  async getTeam(teamId: string): Promise<TeamResponse> {
+    return toTeamResponse(await this.requireTeam(teamId));
   }
 
   async addMembership(
@@ -40,10 +62,7 @@ export class TeamsService {
    * team, so this cannot produce a contradictory history even under concurrency --
    * a second concurrent transfer fails rather than interleaving.
    */
-  async transfer(input: TransferAthleteRequest): Promise<{
-    closed: MembershipResponse | null;
-    opened: MembershipResponse;
-  }> {
+  async transfer(input: TransferAthleteRequest): Promise<TransferResponse> {
     if (input.fromTeamId === input.toTeamId) {
       throw new BadRequestException('Source and destination teams are the same');
     }
@@ -78,7 +97,7 @@ export class TeamsService {
    * scope as it stands now: a coach reads any date of a roster they currently answer
    * for, and no date of one they do not -- including a team they coached last month.
    */
-  async rosterAt(teamId: string, at: Date) {
+  async rosterAt(teamId: string, at: Date): Promise<RosterResponse> {
     // The team id is the scope key, so the refusal is a 403 and needs no read.
     assertCan('read', 'teamMemberships', { teamId });
     await this.requireTeam(teamId);

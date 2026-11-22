@@ -28,5 +28,5 @@ export const Subject = z.enum([
   'sessionParticipants',
   'assessments',
   'userAcademyRoles',
-]);
+]).meta({ id: 'Subject' });
 export type Subject = z.infer<typeof Subject>;

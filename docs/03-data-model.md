@@ -263,25 +263,43 @@ which is what lets a future offline mobile client ship without redesigning this 
 
 ## 4. API design
 
-`REST` under `/api/v1`, generated from the Zod contracts in `packages/contracts`.
+`REST` under `/api/v1`, described by an OpenAPI 3.1 document
+([`apps/api/openapi.json`](../apps/api/openapi.json)) generated from the Zod contracts in
+`packages/contracts` and the routes' own declarations.
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/athletes` | Tenant-scoped by RLS; a coach sees the athletes on teams they coach now |
+| `GET` | `/athletes` | Paginated. Tenant-scoped by RLS; a coach sees the athletes on teams they coach now. Sort by `lastName`, `firstName`, `dateOfBirth`, `createdAt`; `q` matches first or last name |
 | `GET` | `/athletes/:id` | Returns `ETag` |
 | `POST` | `/athletes` | |
 | `PATCH` | `/athletes/:id` | Requires `If-Match`; 409 on stale; an unknown or empty body is a 400, never a silent 200 |
+| `GET` | `/teams` | Paginated; sort by `name`, `q` on the name. A coach sees the teams they coach now |
 | `POST` | `/teams` | |
+| `GET` | `/teams/:id` | A team outside the caller's scope is a 404 |
 | `POST` | `/teams/:id/memberships` | Period, not assignment |
 | `GET` | `/teams/:id/roster?at=<iso>` | `at` defaults to now — the same endpoint answers "who is" and "who was". `at` must be an ISO-8601 instant with an offset. It chooses the period shown; authorization is the caller's team scope *today* |
 | `POST` | `/teams/transfers` | Close one period, open another |
+| `GET` | `/sessions` | Paginated; newest first; optional `teamId`, and `from`/`to` as a half-open period over the start time |
 | `POST` | `/sessions` | |
+| `GET` | `/sessions/:id` | A session outside the caller's scope is a 404 |
 | `POST` | `/sessions/:id/attendance` | Idempotent; validates membership *as at session start* |
 | `GET` | `/sessions/:id/attendance` | The recorded register |
 | `GET` | `/health` | The only `@Public()` route |
 
 What each route demands of the caller is in the generated
 [route manifest](./reference/route-manifest.md).
+
+**Lists are paginated on the server.** A list takes `page` (from 1), `pageSize` (1 to
+100, default 25), `sort` (one of the route's listed keys, `-` in front for descending)
+and, where there is something to search, `q`; it answers `{ items, total, page,
+pageSize }`. An unlisted sort key or an unknown parameter is a 400. `total` is counted
+with the same predicate as the page, the caller's access filter included, so a coach's
+total is the number of rows that coach may see and says nothing about the rest.
+
+**Every response is declared and encoded.** Each route names its response schema with
+`@Responds`, and the result is encoded through it: a field the schema does not name is
+not sent, and a result that does not fit is a 500 with code
+`response_contract_violation`, never the handler's raw return value.
 
 **Every request part is validated or refused.** Each route declares a schema for the
 params, query and body it reads; unknown keys are rejected; and a handler that reads a

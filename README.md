@@ -328,6 +328,10 @@ pnpm run lint               # type-aware ESLint; a dropped `await` is a build fa
 pnpm run lint:boundaries    # architecture fitness rules
 pnpm --filter @athlete/api run test              # unit — no Docker needed
 pnpm --filter @athlete/api run test:integration  # real Postgres via Testcontainers
+
+# after changing a route or a contract: regenerate what is generated from them
+UPDATE_ROUTE_MANIFEST=1 UPDATE_OPENAPI=1 pnpm --filter @athlete/api run test
+pnpm --filter @athlete/web run generate          # the typed client, from openapi.json
 ```
 
 Neither suite needs any environment: the unit suite never boots the application, and
@@ -403,20 +407,21 @@ stack was started on a fresh volume:
 
 ```
 pnpm install --frozen-lockfile              ✓ lockfile unchanged
-pnpm run typecheck                          ✓ no errors (5 tasks)
+pnpm run typecheck                          ✓ no errors (6 tasks)
 pnpm run lint                               ✓ no errors (6 tasks, type-aware)
-pnpm run lint:boundaries                    ✓ no violations (73 modules, 163 dependencies)
+pnpm run lint:boundaries                    ✓ no violations (81 modules, 183 dependencies)
 pnpm run build                              ✓ 3 tasks
-test (unit + route coverage + HTTP)         ✓ 235 passed (14 files)
-test:integration (real Postgres)            ✓ 107 passed (9 files)
+test (unit + route coverage + HTTP)         ✓ 309 passed (17 files)
+test:integration (real Postgres)            ✓ 135 passed (10 files)
+web generate + git diff --exit-code         ✓ openapi.json and the generated client unchanged
 docker build -f apps/api/Dockerfile         ✓ image builds
 docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql, 0003_auth.sql
-./scripts/smoke.sh (containerised stack)    ✓ 64/64 checks passed
+./scripts/smoke.sh (containerised stack)    ✓ 90/90 checks passed
 ```
 
 The smoke run, verbatim, from that fresh volume. Every request after the first block
 carries a session cookie obtained by signing in over HTTP; "academy B sees an empty
-list" is the same request as the line above it with another person's cookie:
+page" is the same request as the line above it with another person's cookie:
 
 ```
 Signing in (a session row behind an httpOnly cookie)
@@ -435,11 +440,12 @@ Liveness and deny-by-default
 
 Tenant isolation over HTTP (identical request, different academy)
   PASS  academy A sees its athletes                  200
-  PASS  academy B sees an empty list                 []
+  PASS  academy B sees an empty page                 0 of 0
   PASS  A's athlete is invisible to B                404
 
 Resource scoping inside one academy (a coach of team A; team B exists beside it)
   PASS  coach lists only their team's athletes       44444444-4444-4444-4444-444444444444
+  PASS  ...and the total counts only those           1 of 2
   PASS  coach is refused team B's roster             403
 
 Optimistic concurrency
@@ -467,6 +473,37 @@ Validation (on by default; a 200 never means "nothing happened")
   PASS  a valid instant is accepted                  200
   PASS  unknown query parameter refused              400
 
+Lists (one page of what the caller may see; the query string is a contract)
+  PASS  a list is { items, total, page, pageSize }   items,page,pageSize,total
+  PASS  page and pageSize default to 1 and 25        1/25
+  PASS  pageSize bounds the page, not the total      1 of 2
+  PASS  sort orders the page                         Oryx
+  PASS  q searches names, case-insensitively         44444444-4444-4444-4444-444444444444
+  PASS  a coach cannot search outside their team     0
+  PASS  an unlisted sort key is a 400                400
+  PASS  ...naming the parameter                      query:sort
+  PASS  pageSize above 100 is a 400                  400
+  PASS  an unknown parameter is a 400                400
+
+Teams and sessions (lists, and reads by id for deep links)
+  PASS  an admin lists both teams                    Team A,Team B
+  PASS  a coach lists the team they coach            Team A of 1
+  PASS  a team is read by id                         Team A
+  PASS  a coach reads their own team                 200
+  PASS  ...and another team is a 404 to them         404
+  PASS  another academy's team is a 404              404
+  PASS  a session is read by id                      66666666-6666-6666-6666-666666666666
+  PASS  sessions are listed, filtered by team        true
+  PASS  a coach sees their team's sessions only      true
+  PASS  ...and another team's session is a 404       404
+  PASS  a period filter is half-open [from, to)      0
+  PASS  sessions have nothing to search: q is 400    400
+
+Responses (declared, and encoded through the declaration)
+  PASS  a create answers 201                         201
+  PASS  switching academy answers 200, as declared   200
+  PASS  a versioned read carries its version twice   true
+
 Who am I (GET /me: academies, and the coarse permissions of the active one)
   PASS  /me needs a session                          401
   PASS  /me names the signed-in user                 admin@alpha.test
@@ -484,7 +521,7 @@ Switching academy (the server chooses; the browser asks)
   PASS  switches to the other academy                200
   PASS  the session moved                            22222222-2222-2222-2222-222222222222
   PASS  ...with the roles held THERE                 true
-  PASS  ...and sees that academy's data              []
+  PASS  ...and sees that academy's data              0
   PASS  an academy that is not theirs is 403         403
   PASS  ...typed not_a_member                        not_a_member
   PASS  ...and the session did not move              11111111-1111-1111-1111-111111111111
@@ -508,7 +545,7 @@ Signing out (the row is deleted, so a copied cookie is worth nothing)
 All smoke checks passed.
 ```
 
-The script is re-runnable: a second run against the same volume also passes 64/64, with
+The script is re-runnable: a second run against the same volume also passes 90/90, with
 a higher integer on the ETag line. It takes about half a minute, most of it spent
 waiting out the sign-in rate limit it then asserts.
 
@@ -579,7 +616,7 @@ Each one exists to make a specific claim falsifiable.
 | `temporal.membership.integration` | Overlapping periods in the same team rejected; concurrent membership of *different* teams allowed; back-to-back periods permitted (`[)` bounds); inverted periods rejected; "who was on this team in March" answered from the period | "maintaining historical records" |
 | `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted — by the application role (no privilege) or by the owner (`RESTRICT`); a replayed offline submission inserts nothing | "maintaining historical records when athletes change teams" |
 | `concurrency.optimistic-lock.integration` | Two writers hold version 0; the first wins, the second affects **zero rows** → 409, and the first writer's change survives; no row lock is held across user think-time | "two users update the same record simultaneously" |
-| `authz.route-coverage` | Walks the real module graph and fails if **any** route does not carry exactly one of `@Permission`, `@Authenticated` and `@Public`; every declared `(action, subject)` is in the shared vocabulary and every subject is claimed by a route or explicitly reserved; the public allowlist is asserted explicitly; the committed [route manifest](docs/reference/route-manifest.md), with paths as served under `/api/v1`, must match the code. The same walk covers validation: no handler binds `@Body`, `@Param` or `@Query`; every part of the request a handler reads, every body-taking method and every path parameter has a declared schema; and every declared schema refuses an unknown key | "secure access based on user roles and responsibilities" |
+| `authz.route-coverage` | Walks the real module graph and fails if **any** route does not carry exactly one of `@Permission`, `@Authenticated` and `@Public`; every declared `(action, subject)` is in the shared vocabulary and every subject is claimed by a route or explicitly reserved; the public allowlist is asserted explicitly; the committed [route manifest](docs/reference/route-manifest.md), with paths as served under `/api/v1`, must match the code. The same walk covers responses: every route declares `@Responds`, an `ETag` is only promised on a versioned body, and a route that requires `If-Match` returns the new version. And validation: no handler binds `@Body`, `@Param` or `@Query`; every part of the request a handler reads, every body-taking method and every path parameter has a declared schema; and every declared schema refuses an unknown key | "secure access based on user roles and responsibilities" |
 | `authz.ability.unit` | One CASL ability definition is the whole policy: grants per role; the operations each route demanded before are held by exactly the roles those routes listed; the coarse (guard) and scoped (query) modes agree on which operations exist, and scoped never grants what the guard refuses; a coach with no active assignment gets **no rule**, not a rule over an empty list | "secure access based on user roles and responsibilities" |
 | `authz.guard.unit` | The guard refuses an undeclared route even for a platform administrator, **and one with two declarations**; answers 401 without a session; admits an account with no academy to an `@Authenticated` route and refuses it a `@Permission` one; and decides from the ability rather than a role list on the route | "secure access based on user roles and responsibilities" |
 | `authz.to-sql-where.unit` | A rule condition compiles to the SQL it says (asserted on rendered text and bound parameters), agrees with the in-memory matcher on `NULL` — including ordering, where CASL coerces null to 0, cross-checked against the real matcher — and **throws** on an unknown operator, an unmapped field, a relation or a boolean ordering operand — a restriction is never silently dropped | — |
@@ -589,6 +626,10 @@ Each one exists to make a specific claim falsifiable.
 | `database-privileges.unit` | The boot-time refusal: each of superuser, `BYPASSRLS`, table ownership, a role reachable only by `SET ROLE`, and any privilege outside the matrix (table-level or column-level, of any kind, on any of its tables) is reported, all at once, and an unmigrated database is a refusal rather than a clean bill | — |
 | `authz.principal-scope.integration` | A coach's scope follows the periods in the data at one instant: a closed assignment contributes no team, an athlete who left drops out, the period is half-open, the instant is the database transaction's `now()` rather than the host clock, and the same user's assignment in another academy is unreachable | "secure access based on user roles and responsibilities" |
 | `validation.http` | Over real HTTP against a running Nest application: the handler receives the schema's **parsed output** (a coerced number, a default), not the raw request; an invalid or unknown field is a 400 typed `VALIDATION` naming it by dot path, with params, query and body reported together; and **a route that reads input without declaring a schema is refused** (500, reason in the log only) rather than handed the raw body | — |
+| `response.http` | Over real HTTP: a field the route's response schema does not declare is **stripped** (a handler returning a whole row leaks nothing), a missing or mistyped field is a 500 `response_contract_violation` with the reason in the log and none of the value on the wire, and **a route that declares no response is refused before its handler runs**; a declared status is the status served; `ETag` is the encoded body's version; `@IfMatch` refuses a write that does not name the version it edits | — |
+| `openapi.document.unit` | The committed `apps/api/openapi.json` is byte-for-byte what the code generates; it validates as OpenAPI 3.1; it contains every served route and nothing else, each with the status it answers with; every `$ref` resolves; `If-Match`/`ETag` appear on exactly the routes that use them; every error status is the one shared body; the session cookie is required everywhere but `@Public`. Requests render from their input side, responses from their output side, and one id with two shapes is refused | — |
+| `contracts.lists.unit` | The list contract coerces `page` and `pageSize` from query-string text, bounds them (`pageSize` ≤ 100), accepts only a listed sort key in either direction, trims and bounds `q`, and refuses an unknown parameter instead of ignoring it; a search term's `%` and `_` are escaped | — |
+| `lists.pagination.integration` | A list is one page of exactly the rows the caller may see, **and `total` is counted under the same access filter**: six athletes exist, a coach of one team gets four and a total of four, and cannot find another team's athlete by name. Sort, search and paging behave, including across ties; a team or session outside scope is a 404 by id; a coach with no current team is refused rather than shown an empty page | "secure access based on user roles and responsibilities" |
 | `contracts.requests.unit` | A request schema never turns a mistake into a successful no-op: a PATCH with a misspelled field, or with no field, is refused where it used to validate to `{}` and bump the version; every request schema, nested entries included, refuses unknown keys; `?at` must be an ISO-8601 instant with an offset | "two users update the same record simultaneously" |
 | `optimistic-concurrency.unit` | `If-Match`/`ETag` parsing, including malformed and weak validators; a stale write is a 409 carrying the version the caller held | "two users update the same record simultaneously" |
 | `auth.session.integration` | With better-auth connected as its own role: an account made by the operator CLI signs in and gets an httpOnly, SameSite=Lax cookie that resolves to a session **row**; a wrong password and an unknown email are refused identically; sign-up is refused over HTTP and server-side; after sign-out, or a `DELETE` of the row, the same cookie resolves to nothing on the next request; the browser cannot set its academy through `update-session`; a session whose academy the user no longer belongs to falls back and is rewritten | "secure access based on user roles and responsibilities" |
@@ -678,9 +719,11 @@ Scope choices, each one a decision rather than an omission:
   works and is tested at the database, as the application role; no route does it. The
   rule that a departed coach keeps the assessments they authored is designed and has
   no route to apply to.
-- **OpenAPI generation and the generated client.** Specified in
-  [`docs/01-technology-stack.md`](./docs/01-technology-stack.md); the Zod contracts it
-  generates from are already the single source of truth in `packages/contracts`.
+- **The web application.** `apps/web` holds the typed client generated from
+  [`apps/api/openapi.json`](./apps/api/openapi.json) and nothing else yet: no screens.
+  The document is generated from the Zod contracts and the routes' declarations, and
+  both it and the client are checked for drift
+  ([`apps/web/README.md`](./apps/web/README.md)).
 - **Backup cron, restore drill and backup-absence alerts.** Marked `STUB` in
   `infra/terraform/stacks/<env>/base/backup.tf`. Front Door and private networking for
   Postgres are written but unapplied, with their gaps (a rate-limit-only WAF, origins
@@ -706,7 +749,9 @@ apps/
     src/common/         tenancy, authz, validation, errors, HTTP concerns
     src/modules/        athletes · teams · sessions · auth
     test/               unit + Testcontainers integration
-  web/                  SPA build target (deliberately minimal)
+    src/openapi/        the route walk and the OpenAPI generator
+    openapi.json        GENERATED from the contracts and route metadata; committed
+  web/                  the generated, typed API client (no screens yet)
 packages/
   contracts/            Zod schemas — single source of truth
   config/               fail-fast env validation

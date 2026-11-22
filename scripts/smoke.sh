@@ -132,14 +132,16 @@ check "a made-up cookie is refused"    401  "$(code -H 'Cookie: athlete.session_
 echo
 echo "Tenant isolation over HTTP (identical request, different academy)"
 check "academy A sees its athletes"    200  "$(code -b "$A" "$BASE/athletes")"
-check "academy B sees an empty list"   "[]" "$(curl -s -b "$B" "$BASE/athletes")"
+check "academy B sees an empty page"   "0 of 0" "$(json 'd.items.length+" of "+d.total' -b "$B" "$BASE/athletes")"
 check "A's athlete is invisible to B"  404  "$(code -b "$B" "$BASE/athletes/$ATHLETE")"
 
 echo
 echo "Resource scoping inside one academy (a coach of team A; team B exists beside it)"
 # The administrator's list above holds both athletes. The coach's holds exactly the one
 # on the team they coach -- asserted as the id list, so an unfiltered query fails here.
-check "coach lists only their team's athletes" "$ATHLETE" "$(curl -s -b "$C" "$BASE/athletes" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).map(a=>a.id).join(","))}catch{process.stdout.write("<unparseable>")}})')"
+check "coach lists only their team's athletes" "$ATHLETE" "$(json 'd.items.map(a=>a.id).join(",")' -b "$C" "$BASE/athletes")"
+# The count is the other way to leak: the academy has two athletes, the coach may see one.
+check "...and the total counts only those" "1 of 2" "$(json 'd.total' -b "$C" "$BASE/athletes") of $(json 'd.total' -b "$A" "$BASE/athletes")"
 check "coach is refused team B's roster"  403  "$(code -b "$C" "$BASE/teams/$TEAM_B/roster")"
 
 echo
@@ -190,6 +192,49 @@ check "a valid instant is accepted"    200  "$(code -b "$A" "$BASE/teams/$TEAM_A
 check "unknown query parameter refused" 400 "$(code -b "$A" "$BASE/teams/$TEAM_A/roster?when=now")"
 
 echo
+echo "Lists (one page of what the caller may see; the query string is a contract)"
+page() { json "$1" -b "$2" "$BASE/$3"; }
+check "a list is { items, total, page, pageSize }" "items,page,pageSize,total" "$(page 'Object.keys(d).sort().join(",")' "$A" athletes)"
+check "page and pageSize default to 1 and 25"   "1/25"  "$(page 'd.page+"/"+d.pageSize' "$A" athletes)"
+check "pageSize bounds the page, not the total" "1 of 2" "$(page 'd.items.length+" of "+d.total' "$A" 'athletes?pageSize=1')"
+check "sort orders the page"                    "Oryx"  "$(page 'd.items[0].lastName' "$A" 'athletes?sort=-lastName')"
+check "q searches names, case-insensitively"    "$ATHLETE" "$(page 'd.items.map(a=>a.id).join(",")' "$A" 'athletes?q=AMAL')"
+check "a coach cannot search outside their team" 0      "$(page 'd.total' "$C" 'athletes?q=oryx')"
+check "an unlisted sort key is a 400"           400     "$(code -b "$A" "$BASE/athletes?sort=academyId")"
+check "...naming the parameter"                 "query:sort" "$(field_path -b "$A" "$BASE/athletes?sort=academyId")"
+check "pageSize above 100 is a 400"             400     "$(code -b "$A" "$BASE/athletes?pageSize=500")"
+check "an unknown parameter is a 400"           400     "$(code -b "$A" "$BASE/athletes?limit=5")"
+
+echo
+echo "Teams and sessions (lists, and reads by id for deep links)"
+check "an admin lists both teams"               "Team A,Team B" "$(page 'd.items.map(t=>t.name).join(",")' "$A" teams)"
+check "a coach lists the team they coach"       "Team A of 1"   "$(page 'd.items.map(t=>t.name).join(",")+" of "+d.total' "$C" teams)"
+check "a team is read by id"                    "Team A" "$(page 'd.name' "$A" "teams/$TEAM_A")"
+check "a coach reads their own team"            200     "$(code -b "$C" "$BASE/teams/$TEAM_A")"
+check "...and another team is a 404 to them"    404     "$(code -b "$C" "$BASE/teams/$TEAM_B")"
+check "another academy's team is a 404"         404     "$(code -b "$B" "$BASE/teams/$TEAM_A")"
+new_session() { # new_session <team>  -- prints the new session's id
+  json 'd.id' -X POST -b "$A" -H "$JSON" -H "Origin: $ORIGIN" \
+    -d "{\"teamId\":\"$1\",\"startsAt\":\"2026-03-01T16:00:00Z\",\"endsAt\":\"2026-03-01T17:30:00Z\"}" "$BASE/sessions"
+}
+SESSION_A=$(new_session "$TEAM_A"); SESSION_B=$(new_session "$TEAM_B")
+check "a session is read by id"                 "$TEAM_A" "$(page 'd.teamId' "$A" "sessions/$SESSION_A")"
+check "sessions are listed, filtered by team"   true    "$(page "d.total>=1&&d.items.every(s=>s.teamId==='$TEAM_B')" "$A" "sessions?teamId=$TEAM_B")"
+check "a coach sees their team's sessions only" true    "$(page "d.total>=1&&d.items.every(s=>s.teamId==='$TEAM_A')" "$C" sessions)"
+check "...and another team's session is a 404"  404     "$(code -b "$C" "$BASE/sessions/$SESSION_B")"
+check "a period filter is half-open [from, to)" 0       "$(page 'd.total' "$A" 'sessions?from=2026-03-01T15:00:00Z&to=2026-03-01T16:00:00Z')"
+check "sessions have nothing to search: q is 400" 400   "$(code -b "$A" "$BASE/sessions?q=pitch")"
+
+echo
+echo "Responses (declared, and encoded through the declaration)"
+# The ETag is no longer set by a controller: it is made from the encoded body by the
+# response interceptor, so the last check here shows that interceptor is wired.
+NEW_SESSION="{\"teamId\":\"$TEAM_A\",\"startsAt\":\"2026-03-02T16:00:00Z\",\"endsAt\":\"2026-03-02T17:30:00Z\"}"
+check "a create answers 201"                    201     "$(code -X POST -b "$A" -H "$JSON" -H "Origin: $ORIGIN" -d "$NEW_SESSION" "$BASE/sessions")"
+check "switching academy answers 200, as declared" 200  "$(code -X POST -b "$A" -H "$JSON" -H "Origin: $ORIGIN" -d "{\"academyId\":\"$ACADEMY_A\"}" "$BASE/me/active-academy")"
+check "a versioned read carries its version twice" true "$(curl -s -D "$JARS/headers" -b "$A" "$BASE/athletes/$ATHLETE" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const h=require("fs").readFileSync(process.argv[1],"utf8");const m=/^etag:\s*"(\d+)"/im.exec(h);process.stdout.write(String(Boolean(m)&&Number(m[1])===JSON.parse(s).version))})' "$JARS/headers")"
+
+echo
 echo "Who am I (GET /me: academies, and the coarse permissions of the active one)"
 me() { json "$1" -b "$2" "$BASE/me"; }
 check "/me needs a session"            401  "$(code "$BASE/me")"
@@ -213,7 +258,7 @@ check "...as a coach there"                false "$(has 'create athletes' "$M")"
 check "switches to the other academy"      200  "$(switch "$M" "$ACADEMY_B")"
 check "the session moved"                  "$ACADEMY_B" "$(me 'd.activeAcademyId' "$M")"
 check "...with the roles held THERE"       true  "$(has 'create athletes' "$M")"
-check "...and sees that academy's data"    "[]" "$(curl -s -b "$M" "$BASE/athletes")"
+check "...and sees that academy's data"    0    "$(json 'd.total' -b "$M" "$BASE/athletes")"
 check "an academy that is not theirs is 403" 403 "$(switch "$A" "$ACADEMY_B")"
 check "...typed not_a_member"              not_a_member "$(field code -X POST -b "$A" -H "$JSON" -H "Origin: $ORIGIN" -d "{\"academyId\":\"$ACADEMY_B\"}" "$BASE/me/active-academy")"
 check "...and the session did not move"    "$ACADEMY_A" "$(me 'd.activeAcademyId' "$A")"
@@ -227,7 +272,7 @@ EVIL='Origin: https://evil.example'
 NEW_ATHLETE='{"firstName":"Cross","lastName":"Site","dateOfBirth":"2010-01-01"}'
 check "POST from a foreign origin is 403"   403  "$(code -X POST -b "$A" -H "$JSON" -H "$EVIL" -d "$NEW_ATHLETE" "$BASE/athletes")"
 check "...typed invalid_origin"             invalid_origin "$(field code -X POST -b "$A" -H "$JSON" -H "$EVIL" -d "$NEW_ATHLETE" "$BASE/athletes")"
-check "...and nothing was written"          0    "$(json 'd.filter(a=>a.lastName==="Site").length' -b "$A" "$BASE/athletes")"
+check "...and nothing was written"          0    "$(json 'd.total' -b "$A" "$BASE/athletes?q=Site")"
 check "a foreign-origin GET is not refused" 200  "$(code -b "$A" -H "$EVIL" "$BASE/athletes")"
 check "the application's own origin passes" 200  "$(switch "$A" "$ACADEMY_A")"
 check "better-auth refuses it on its routes" 403 "$(code -X POST -b "$A" -H "$JSON" -H "$EVIL" -d '{}' "$AUTH/sign-out")"

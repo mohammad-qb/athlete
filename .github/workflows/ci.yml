@@ -47,6 +47,15 @@ jobs:
       - name: Unit tests
         run: pnpm --filter @athlete/api run test
 
+      # The typed web client is generated from apps/api/openapi.json, which the unit
+      # tests above have just checked against the code. Regenerating here and diffing
+      # closes the other half: a contract change committed without its client is a red
+      # build, not a type the browser code silently no longer matches.
+      - name: Generated API client is current
+        run: |
+          pnpm --filter @athlete/web run generate
+          git diff --exit-code apps/web/src/lib/api/generated
+
       # Integration tests start a real Postgres via Testcontainers. The guarantees being
       # asserted (RLS, exclusion constraints, composite FKs) exist in the database, so
       # testing them against anything else would prove nothing.

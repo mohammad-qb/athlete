@@ -1,62 +1,67 @@
-import { Controller, Get, Headers, Patch, Post, Res } from '@nestjs/common';
-import type { Response } from 'express';
+import { Controller, Get, Patch, Post } from '@nestjs/common';
 import {
+  AthleteListQuery,
+  AthletePage,
+  AthleteResponse,
   CreateAthleteRequest,
   IdParams,
   UpdateAthleteRequest,
-  type AthleteResponse,
 } from '@athlete/contracts';
 import { AthletesService } from './athletes.service';
 import { Permission } from '../../common/authz/permission.decorator';
-import { formatETag, parseIfMatch } from '../../common/http/optimistic-concurrency';
-import { Validate, ValidBody, ValidParams } from '../../common/validation/validate.decorator';
+import { IfMatch } from '../../common/http/if-match.decorator';
+import { Responds } from '../../common/validation/responds.decorator';
+import {
+  Validate,
+  ValidBody,
+  ValidParams,
+  ValidQuery,
+} from '../../common/validation/validate.decorator';
 
-/** Thin by design: HTTP concerns and validation only, no business rules. */
+/**
+ * Thin by design: HTTP concerns and validation only, no business rules.
+ *
+ * `etag: true` sends the encoded body's `version` as `ETag`; `@IfMatch()` requires it
+ * back. Both are declarations, so the OpenAPI document lists the two headers on exactly
+ * the routes that use them.
+ */
 @Controller('athletes')
 export class AthletesController {
   constructor(private readonly athletes: AthletesService) {}
 
   @Get()
   @Permission({ action: 'read', subject: 'athletes' })
-  list(): Promise<AthleteResponse[]> {
-    return this.athletes.list();
+  @Validate({ query: AthleteListQuery })
+  @Responds(AthletePage)
+  list(@ValidQuery() query: AthleteListQuery): Promise<AthletePage> {
+    return this.athletes.list(query);
   }
 
   @Get(':id')
   @Permission({ action: 'read', subject: 'athletes' })
   @Validate({ params: IdParams })
-  async getById(
-    @ValidParams('id') id: string,
-    @Res({ passthrough: true }) response: Response,
-  ): Promise<AthleteResponse> {
-    const athlete = await this.athletes.getById(id);
-    response.setHeader('ETag', formatETag(athlete.version));
-    return athlete;
+  @Responds(AthleteResponse, { etag: true })
+  getById(@ValidParams('id') id: string): Promise<AthleteResponse> {
+    return this.athletes.getById(id);
   }
 
   @Post()
   @Permission({ action: 'create', subject: 'athletes' })
   @Validate({ body: CreateAthleteRequest })
-  async create(
-    @ValidBody() body: CreateAthleteRequest,
-    @Res({ passthrough: true }) response: Response,
-  ): Promise<AthleteResponse> {
-    const athlete = await this.athletes.create(body);
-    response.setHeader('ETag', formatETag(athlete.version));
-    return athlete;
+  @Responds(AthleteResponse, { etag: true })
+  create(@ValidBody() body: CreateAthleteRequest): Promise<AthleteResponse> {
+    return this.athletes.create(body);
   }
 
   @Patch(':id')
   @Permission({ action: 'update', subject: 'athletes' })
   @Validate({ params: IdParams, body: UpdateAthleteRequest })
-  async update(
+  @Responds(AthleteResponse, { etag: true })
+  update(
     @ValidParams('id') id: string,
-    @Headers('if-match') ifMatch: string | undefined,
+    @IfMatch() expectedVersion: number,
     @ValidBody() body: UpdateAthleteRequest,
-    @Res({ passthrough: true }) response: Response,
   ): Promise<AthleteResponse> {
-    const athlete = await this.athletes.update(id, parseIfMatch(ifMatch), body);
-    response.setHeader('ETag', formatETag(athlete.version));
-    return athlete;
+    return this.athletes.update(id, expectedVersion, body);
   }
 }

@@ -26,6 +26,9 @@ export const AUTH_BASE_PATH = '/api/auth';
 /** `<prefix>.session_token`, or `__Secure-<prefix>.session_token` when the base URL is https. */
 export const AUTH_COOKIE_PREFIX = 'athlete';
 
+/** The session cookie over http. Published in the OpenAPI document as the security scheme. */
+export const SESSION_COOKIE_NAME = `${AUTH_COOKIE_PREFIX}.session_token`;
+
 /**
  * THE better-auth configuration. Every option that carries a security decision is
  * stated here even where it restates a default, so a default changing upstream is a

@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq, sql, type AnyColumn, type SQL } from 'drizzle-orm';
-import type { Action } from '@athlete/contracts';
+import { and, count, eq, ilike, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import type { Action, AthleteListQuery } from '@athlete/contracts';
 import { athletes } from '../../db/schema';
 import type { SubjectRows } from '../../common/authz/ability';
 import { accessibleBy } from '../../common/authz/accessible-by';
+import { containsPattern, orderBy, pageWindow } from '../../common/db/listing';
 import { requestContext } from '../../common/tenancy/request-context';
 
 export type AthleteRow = typeof athletes.$inferSelect;
@@ -16,6 +17,14 @@ const ATHLETE_COLUMNS = { id: athletes.id } satisfies Record<
   keyof SubjectRows['athletes'],
   AnyColumn
 >;
+
+/** What `?sort=` may name, and the column each name orders by. */
+const SORT_COLUMNS = {
+  lastName: athletes.lastName,
+  firstName: athletes.firstName,
+  dateOfBirth: athletes.dateOfBirth,
+  createdAt: athletes.createdAt,
+} satisfies Record<string, AnyColumn>;
 
 /**
  * The only place in the athletes module where SQL exists.
@@ -46,12 +55,37 @@ export class AthletesRepository {
     return accessibleBy(this.ctx().ability, action, 'athletes', ATHLETE_COLUMNS);
   }
 
-  async list(access: SQL | undefined): Promise<AthleteRow[]> {
+  /**
+   * One page, and the size of the whole result it is a page of.
+   *
+   * Both queries are built from the SAME predicate, access filter included. A count
+   * taken without it would tell a coach how many athletes the academy has -- a number
+   * about rows they may not see -- so `total` is, by construction, the number of rows
+   * this principal could page through.
+   */
+  async page(
+    query: AthleteListQuery,
+    access: SQL | undefined,
+  ): Promise<{ rows: AthleteRow[]; total: number }> {
     const { tx, academyId } = this.ctx();
-    return tx
+    const pattern = query.q ? containsPattern(query.q) : undefined;
+    const where = and(
+      eq(athletes.academyId, academyId),
+      access,
+      pattern ? or(ilike(athletes.firstName, pattern), ilike(athletes.lastName, pattern)) : undefined,
+    );
+    const { limit, offset } = pageWindow(query);
+
+    const rows = await tx
       .select()
       .from(athletes)
-      .where(and(eq(athletes.academyId, academyId), access));
+      .where(where)
+      .orderBy(...orderBy(SORT_COLUMNS, query.sort, athletes.id))
+      .limit(limit)
+      .offset(offset);
+    const [counted] = await tx.select({ total: count() }).from(athletes).where(where);
+
+    return { rows, total: counted?.total ?? 0 };
   }
 
   async findById(id: string, access: SQL | undefined): Promise<AthleteRow | undefined> {

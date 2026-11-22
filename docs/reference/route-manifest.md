@@ -20,6 +20,13 @@ and origin-checked by the library. See `docs/adr/0006-cookie-sessions-and-the-au
 "Validates" lists the parts of the request the route declares a schema for with
 `@Validate`. A handler can only read a part that is listed: the `@Valid*` parameter
 decorators refuse an undeclared one at runtime, and the same test fails the build first.
+`If-Match` marks a route that requires the version being edited.
+
+"Responds" is the success status and the schema the route declares with `@Responds`.
+Every response is encoded through it, so a field the schema does not name is never
+sent; `+ ETag` marks a route that also returns the resource version as a header. The
+schemas themselves are published in [`apps/api/openapi.json`](../../apps/api/openapi.json),
+generated from the same walk.
 
 Regenerate with:
 
@@ -27,19 +34,23 @@ Regenerate with:
 UPDATE_ROUTE_MANIFEST=1 pnpm --filter @athlete/api run test
 ```
 
-| Method | Path | Handler | Action | Subject | Validates |
-|---|---|---|---|---|---|
-| GET | `/api/v1/athletes` | `AthletesController.list` | read | athletes | — |
-| POST | `/api/v1/athletes` | `AthletesController.create` | create | athletes | body |
-| GET | `/api/v1/athletes/:id` | `AthletesController.getById` | read | athletes | params |
-| PATCH | `/api/v1/athletes/:id` | `AthletesController.update` | update | athletes | params, body |
-| GET | `/api/v1/health` | `HealthController.live` | _public_ | _public_ | — |
-| GET | `/api/v1/me` | `MeController.read` | _authenticated_ | _authenticated_ | — |
-| POST | `/api/v1/me/active-academy` | `MeController.switchAcademy` | _authenticated_ | _authenticated_ | body |
-| POST | `/api/v1/sessions` | `SessionsController.create` | create | trainingSessions | body |
-| GET | `/api/v1/sessions/:id/attendance` | `SessionsController.register` | read | sessionParticipants | params |
-| POST | `/api/v1/sessions/:id/attendance` | `SessionsController.recordAttendance` | create | sessionParticipants | params, body |
-| POST | `/api/v1/teams` | `TeamsController.createTeam` | create | teams | body |
-| POST | `/api/v1/teams/:id/memberships` | `TeamsController.addMembership` | create | teamMemberships | params, body |
-| GET | `/api/v1/teams/:id/roster` | `TeamsController.roster` | read | teamMemberships | params, query |
-| POST | `/api/v1/teams/transfers` | `TeamsController.transfer` | update | teamMemberships | body |
+| Method | Path | Handler | Action | Subject | Validates | Responds |
+|---|---|---|---|---|---|---|
+| GET | `/api/v1/athletes` | `AthletesController.list` | read | athletes | query | 200 AthletePage |
+| POST | `/api/v1/athletes` | `AthletesController.create` | create | athletes | body | 201 AthleteResponse + ETag |
+| GET | `/api/v1/athletes/:id` | `AthletesController.getById` | read | athletes | params | 200 AthleteResponse + ETag |
+| PATCH | `/api/v1/athletes/:id` | `AthletesController.update` | update | athletes | params, body, If-Match | 200 AthleteResponse + ETag |
+| GET | `/api/v1/health` | `HealthController.live` | _public_ | _public_ | — | 200 HealthResponse |
+| GET | `/api/v1/me` | `MeController.read` | _authenticated_ | _authenticated_ | — | 200 MeResponse |
+| POST | `/api/v1/me/active-academy` | `MeController.switchAcademy` | _authenticated_ | _authenticated_ | body | 200 MeResponse |
+| GET | `/api/v1/sessions` | `SessionsController.list` | read | trainingSessions | query | 200 SessionPage |
+| POST | `/api/v1/sessions` | `SessionsController.create` | create | trainingSessions | body | 201 SessionResponse |
+| GET | `/api/v1/sessions/:id` | `SessionsController.getById` | read | trainingSessions | params | 200 SessionResponse |
+| GET | `/api/v1/sessions/:id/attendance` | `SessionsController.register` | read | sessionParticipants | params | 200 ParticipationResponse[] |
+| POST | `/api/v1/sessions/:id/attendance` | `SessionsController.recordAttendance` | create | sessionParticipants | params, body | 201 ParticipationResponse[] |
+| GET | `/api/v1/teams` | `TeamsController.list` | read | teams | query | 200 TeamPage |
+| POST | `/api/v1/teams` | `TeamsController.create` | create | teams | body | 201 TeamResponse |
+| GET | `/api/v1/teams/:id` | `TeamsController.getById` | read | teams | params | 200 TeamResponse |
+| POST | `/api/v1/teams/:id/memberships` | `TeamsController.addMembership` | create | teamMemberships | params, body | 201 MembershipResponse |
+| GET | `/api/v1/teams/:id/roster` | `TeamsController.roster` | read | teamMemberships | params, query | 200 RosterEntry[] |
+| POST | `/api/v1/teams/transfers` | `TeamsController.transfer` | update | teamMemberships | body | 201 TransferResponse |

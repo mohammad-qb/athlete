@@ -8,10 +8,12 @@ import { Role, strictObject, Uuid } from './primitives';
  * so a client has one question to ask ("is this pair in the list?") and no wildcard
  * rule of its own to keep in step with the server's.
  */
-export const PermissionAction = Action.exclude(['manage']);
+export const PermissionAction = Action.exclude(['manage']).meta({ id: 'PermissionAction' });
 export type PermissionAction = z.infer<typeof PermissionAction>;
 
-export const GrantedPermission = z.object({ action: PermissionAction, subject: Subject });
+export const GrantedPermission = z
+  .object({ action: PermissionAction, subject: Subject })
+  .meta({ id: 'GrantedPermission' });
 export type GrantedPermission = z.infer<typeof GrantedPermission>;
 
 /** One academy the signed-in user belongs to, with every role they hold there. */
@@ -19,7 +21,7 @@ export const MeAcademy = z.object({
   id: Uuid,
   name: z.string(),
   roles: z.array(Role),
-});
+}).meta({ id: 'MeAcademy' });
 export type MeAcademy = z.infer<typeof MeAcademy>;
 
 /**
@@ -42,9 +44,11 @@ export const MeResponse = z.object({
   activeAcademyId: Uuid.nullable(),
   academies: z.array(MeAcademy),
   permissions: z.array(GrantedPermission),
-});
+}).meta({ id: 'MeResponse' });
 export type MeResponse = z.infer<typeof MeResponse>;
 
 /** `POST /me/active-academy`: act in another academy the user belongs to. */
-export const SwitchAcademyRequest = strictObject({ academyId: Uuid });
+export const SwitchAcademyRequest = strictObject({ academyId: Uuid }).meta({
+  id: 'SwitchAcademyRequest',
+});
 export type SwitchAcademyRequest = z.infer<typeof SwitchAcademyRequest>;
