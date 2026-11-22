@@ -29,28 +29,47 @@ services:
   # Migrations as a separate, explicit step -- mirroring the CI pipeline, where they
   # run before the app deploy rather than on container start.
   migrate:
+    # The SAME image as `api`, by name. This service sits behind a profile, so
+    # `up --build` does not rebuild it; with its own image tag, `run --rm migrate` kept
+    # running whatever migrations were baked in the last time it happened to be built
+    # and reported "Already up to date" against a newer tree.
+    image: athlete/api:local
     build:
       context: .
       dockerfile: apps/api/Dockerfile
     command: ['node', 'dist/db/migrate.js']
     environment:
+      # Migrations run as the OWNER -- a different identity from the one that serves
+      # requests, which is the whole privilege split.
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/athlete
+      # Local only: the migrations create `athlete_app` as NOLOGIN, and production
+      # provisions its credential from Key Vault. Here the migrate step sets one so the
+      # API has a non-superuser role it can actually connect as.
+      APP_ROLE_PASSWORD: athlete-app-local-password
     depends_on:
       postgres:
         condition: service_healthy
     profiles: ['tools']
 
   api:
+    image: athlete/api:local
     build:
       context: .
       dockerfile: apps/api/Dockerfile
     environment:
       NODE_ENV: production
       PORT: '3000'
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/athlete
+      # The application role: non-owner, NOBYPASSRLS, no DELETE on facts. The API checks
+      # this at boot and refuses to start on the superuser URL the migrate step uses.
+      DATABASE_URL: postgres://athlete_app:athlete-app-local-password@postgres:5432/athlete
       SESSION_SECRET: local-development-secret-at-least-32-chars
     ports:
       - '${API_PORT:-3000}:3000'
+    # Until `migrate` has run there is no schema and no application role, and the API
+    # refuses to start rather than serve from a database it cannot vouch for. It exits
+    # and is retried, so `up` followed by `run --rm migrate` converges without a second
+    # `up`.
+    restart: on-failure
     depends_on:
       postgres:
         condition: service_healthy

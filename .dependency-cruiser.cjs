@@ -50,12 +50,7 @@ module.exports = {
         //  - *.repository.ts      the sanctioned data-access layer
         //  - src/db/              the schema and migration runner themselves
         //  - tenancy/database.*   infrastructure: it types the Drizzle client
-        //  - policy.service.ts    owns its own authorization reads, because routing
-        //                         them through feature repositories would make the
-        //                         common layer depend on feature modules -- a worse
-        //                         coupling than the one it would remove.
-        pathNot:
-          '(\\.repository\\.ts$|src/db/|src/common/tenancy/database\\.service\\.ts$|policy\\.service\\.ts$)',
+        pathNot: '(\\.repository\\.ts$|src/db/|src/common/tenancy/database\\.service\\.ts$)',
       },
       to: { path: 'apps/api/src/db/schema\\.ts$' },
     },

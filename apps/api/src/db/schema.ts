@@ -7,8 +7,20 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+
+/**
+ * Recorded facts are never deleted or edited: a wrong one is VOIDED (who, when) and a
+ * correct row inserted beside it. `voided_at IS NULL` is what "active" means -- see
+ * `common/db/active-row.ts`, the one predicate every fact read applies.
+ */
+const voiding = {
+  voidedAt: timestamp('voided_at', { withTimezone: true }),
+  voidedBy: uuid('voided_by'),
+};
 
 /**
  * Typed mirror of the hand-written SQL in ../../drizzle. The SQL is the source of
@@ -88,6 +100,7 @@ export const teamMemberships = pgTable(
     validFrom: timestamp('valid_from', { withTimezone: true }).notNull(),
     validTo: timestamp('valid_to', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    ...voiding,
   },
   (t) => [index('team_memberships_athlete_idx').on(t.academyId, t.athleteId)],
 );
@@ -135,9 +148,13 @@ export const sessionParticipants = pgTable(
     recordedByUserId: uuid('recorded_by_user_id').notNull(),
     recordedAt: timestamp('recorded_at', { withTimezone: true }).notNull().defaultNow(),
     version: integer('version').notNull().default(0),
+    ...voiding,
   },
   (t) => [
-    unique('session_participants_once_per_session').on(t.sessionId, t.athleteId),
+    // One ACTIVE entry per athlete per session: a voided row must not block its replacement.
+    uniqueIndex('session_participants_once_per_session')
+      .on(t.sessionId, t.athleteId)
+      .where(sql`voided_at is null`),
     unique('session_participants_idempotency_uq').on(t.academyId, t.clientRecordId),
   ],
 );
@@ -153,6 +170,7 @@ export const assessments = pgTable(
     assessedAt: timestamp('assessed_at', { withTimezone: true }).notNull().defaultNow(),
     metrics: jsonb('metrics').notNull().default({}),
     notes: text('notes'),
+    ...voiding,
   },
   (t) => [index('assessments_athlete_idx').on(t.academyId, t.athleteId, t.assessedAt)],
 );

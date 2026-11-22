@@ -22,6 +22,9 @@ export SESSION_SECRET="${SESSION_SECRET:-local-development-secret-at-least-32-ch
 ACADEMY_A=11111111-1111-1111-1111-111111111111
 ACADEMY_B=22222222-2222-2222-2222-222222222222
 ATHLETE=44444444-4444-4444-4444-444444444444
+COACH=55555555-5555-5555-5555-555555555555
+TEAM_A=66666666-6666-6666-6666-666666666666
+TEAM_B=77777777-7777-7777-7777-777777777777
 
 fail=0
 check() { # check <label> <expected> <actual>
@@ -48,13 +51,25 @@ field() { # field <json-path-key> <curl args...>
   curl -s "$@" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s)[process.argv[1]]))}catch{process.stdout.write("<unparseable>")}})' "$key"
 }
 
+# The API refuses to start until the database is migrated and it is connected as the
+# application role, and compose restarts it until then -- so straight after
+# `docker compose run --rm migrate` it may still be on its way up.
+printf 'Waiting for the API'
+for _ in $(seq 1 30); do
+  [ "$(code "$BASE/health")" = 200 ] && break
+  printf '.'; sleep 2
+done
+echo
+
 echo "Seeding demo data..."
 docker compose exec -T postgres psql -U postgres -d athlete -q < scripts/seed-demo.sql > /dev/null
 
 TOKEN_A=$(node scripts/mint-token.js "$ACADEMY_A")
 TOKEN_B=$(node scripts/mint-token.js "$ACADEMY_B")
+TOKEN_COACH=$(node scripts/mint-token.js "$ACADEMY_A" coach "$COACH")
 A="Authorization: Bearer $TOKEN_A"
 B="Authorization: Bearer $TOKEN_B"
+C="Authorization: Bearer $TOKEN_COACH"
 JSON='Content-Type: application/json'
 
 echo
@@ -67,6 +82,13 @@ echo "Tenant isolation over HTTP (identical request, different academy)"
 check "academy A sees its athletes"    200  "$(code -H "$A" "$BASE/athletes")"
 check "academy B sees an empty list"   "[]" "$(curl -s -H "$B" "$BASE/athletes")"
 check "A's athlete is invisible to B"  404  "$(code -H "$B" "$BASE/athletes/$ATHLETE")"
+
+echo
+echo "Resource scoping inside one academy (a coach of team A; team B exists beside it)"
+# The administrator's list above holds both athletes. The coach's holds exactly the one
+# on the team they coach -- asserted as the id list, so an unfiltered query fails here.
+check "coach lists only their team's athletes" "$ATHLETE" "$(curl -s -H "$C" "$BASE/athletes" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).map(a=>a.id).join(","))}catch{process.stdout.write("<unparseable>")}})')"
+check "coach is refused team B's roster"  403  "$(code -H "$C" "$BASE/teams/$TEAM_B/roster")"
 
 echo
 echo "Optimistic concurrency"

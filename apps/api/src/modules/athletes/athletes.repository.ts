@@ -1,9 +1,21 @@
 import { Injectable } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import type { Action } from '@athlete/contracts';
 import { athletes } from '../../db/schema';
+import type { SubjectRows } from '../../common/authz/ability';
+import { accessibleBy } from '../../common/authz/accessible-by';
 import { requestContext } from '../../common/tenancy/request-context';
 
 export type AthleteRow = typeof athletes.$inferSelect;
+
+/**
+ * The columns the policy may condition on for `athletes`. `satisfies` ties it to
+ * `SubjectRows`: a rule on a new field does not compile until its column is mapped here.
+ */
+const ATHLETE_COLUMNS = { id: athletes.id } satisfies Record<
+  keyof SubjectRows['athletes'],
+  AnyColumn
+>;
 
 /**
  * The only place in the athletes module where SQL exists.
@@ -15,6 +27,13 @@ export type AthleteRow = typeof athletes.$inferSelect;
  * academy_id still appears in every predicate even though RLS already enforces it.
  * That redundancy is deliberate defence in depth: if a policy were ever dropped by a
  * bad migration, these queries keep working correctly instead of silently widening.
+ *
+ * Every method that reads or changes an existing row also takes a REQUIRED `access`
+ * predicate -- the principal's scope for the action, from `accessFilter`. Required, not
+ * optional, so a query written without deciding whose rows it may touch does not
+ * compile. `undefined` is a real value here, meaning "unrestricted" (an administrator);
+ * it only ever comes out of `accessFilter`, which throws rather than return it for a
+ * principal who holds no grant.
  */
 @Injectable()
 export class AthletesRepository {
@@ -22,17 +41,25 @@ export class AthletesRepository {
     return requestContext.require();
   }
 
-  async list(): Promise<AthleteRow[]> {
-    const { tx, academyId } = this.ctx();
-    return tx.select().from(athletes).where(eq(athletes.academyId, academyId));
+  /** Which athletes may the current principal `action`? Throws FORBIDDEN if none at all. */
+  accessFilter(action: Action): SQL | undefined {
+    return accessibleBy(this.ctx().ability, action, 'athletes', ATHLETE_COLUMNS);
   }
 
-  async findById(id: string): Promise<AthleteRow | undefined> {
+  async list(access: SQL | undefined): Promise<AthleteRow[]> {
+    const { tx, academyId } = this.ctx();
+    return tx
+      .select()
+      .from(athletes)
+      .where(and(eq(athletes.academyId, academyId), access));
+  }
+
+  async findById(id: string, access: SQL | undefined): Promise<AthleteRow | undefined> {
     const { tx, academyId } = this.ctx();
     const [row] = await tx
       .select()
       .from(athletes)
-      .where(and(eq(athletes.id, id), eq(athletes.academyId, academyId)))
+      .where(and(eq(athletes.id, id), eq(athletes.academyId, academyId), access))
       .limit(1);
     return row;
   }
@@ -55,13 +82,14 @@ export class AthletesRepository {
 
   /**
    * Compare-and-set on `version`. Returns undefined when nothing matched, which the
-   * service distinguishes into 404 (gone) or 409 (stale) -- the caller deserves to know
-   * which.
+   * service distinguishes into 404 (gone, or out of scope) or 409 (stale) -- the caller
+   * deserves to know which.
    */
   async updateIfVersionMatches(
     id: string,
     expectedVersion: number,
     patch: Partial<{ firstName: string; lastName: string; dateOfBirth: string }>,
+    access: SQL | undefined,
   ): Promise<AthleteRow | undefined> {
     const { tx, academyId } = this.ctx();
     const [row] = await tx
@@ -76,6 +104,7 @@ export class AthletesRepository {
           eq(athletes.id, id),
           eq(athletes.academyId, academyId),
           eq(athletes.version, expectedVersion),
+          access,
         ),
       )
       .returning();

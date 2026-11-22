@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { and, eq, gt, inArray, isNull, lte, or } from 'drizzle-orm';
 import { teamCoachAssignments, teamMemberships } from '../../db/schema';
+import { isActive } from '../db/active-row';
 import type { RequestContext } from '../tenancy/request-context';
 import type { Principal, PrincipalScope } from './principal';
 
@@ -15,13 +16,12 @@ type TenantTx = RequestContext['tx'];
  * part of that context. `TenantTx` only ever comes from `runInTenantTransaction`, so
  * the tenant key is already applied and RLS confines both queries.
  *
- * It lives in the common layer, not in the teams module, for the reason the old
- * PolicyService did: authorization reads routed through feature repositories would
- * make the common layer depend on feature modules.
+ * It lives in the common layer, not in the teams module: authorization reads routed
+ * through feature repositories would make the common layer depend on feature modules.
  *
  * `asOf` is the caller's to supply, and request code supplies the DATABASE's clock --
  * the `startedAt` that `runInTenantTransaction` reads from the transaction's `now()`,
- * the same clock `PolicyService` and the periods themselves are written against. It is
+ * the same clock the periods themselves are written against. It is
  * a parameter, not read here, so the instant is taken once per request and so a test
  * can ask about a chosen one.
  */
@@ -62,6 +62,8 @@ export class PrincipalScopeRepository {
           inArray(teamMemberships.teamId, activeTeamIds),
           lte(teamMemberships.validFrom, asOf),
           or(isNull(teamMemberships.validTo), gt(teamMemberships.validTo, asOf)),
+          // A voided membership grants nothing: it never puts an athlete in scope.
+          isActive(teamMemberships),
         ),
       );
 

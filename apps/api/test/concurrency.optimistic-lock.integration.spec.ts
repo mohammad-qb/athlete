@@ -21,7 +21,7 @@ describe('optimistic concurrency', () => {
 
   beforeAll(async () => {
     db = await startTestDatabase();
-    academy = await seedAcademy(db.pool, 'Sharjah Sports Academy');
+    academy = await seedAcademy(db, 'Sharjah Sports Academy');
   }, 180_000);
 
   afterAll(async () => {

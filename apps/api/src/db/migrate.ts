@@ -56,15 +56,46 @@ export async function runMigrations(
   return applied;
 }
 
+/**
+ * Lets the application role log in with a password. LOCAL AND TEST USE ONLY.
+ *
+ * The migrations create `athlete_app` as NOLOGIN on purpose: in production its
+ * credential is provisioned by infrastructure (Key Vault), never by something committed
+ * to a repository. A compose stack and a test container have no such infrastructure,
+ * and without this the only role that CAN log in is the superuser -- which is exactly
+ * the connection the API now refuses to start on.
+ */
+export async function provisionAppRoleLogin(
+  connectionString: string,
+  password: string,
+): Promise<void> {
+  const client = new Client({ connectionString });
+  await client.connect();
+  try {
+    // ALTER ROLE takes no bound parameters, so the literal is quoted by the server.
+    const { rows } = await client.query<{ statement: string }>(
+      `select format('alter role athlete_app with login password %L', $1::text) as statement`,
+      [password],
+    );
+    const statement = rows[0]?.statement;
+    if (!statement) throw new Error('Could not build the ALTER ROLE statement');
+    await client.query(statement);
+  } finally {
+    await client.end();
+  }
+}
+
 if (require.main === module) {
   const url = process.env.DATABASE_URL;
   if (!url) {
     console.error('DATABASE_URL is required');
     process.exit(1);
   }
+  const appRolePassword = process.env.APP_ROLE_PASSWORD;
   runMigrations(url)
-    .then((applied) => {
+    .then(async (applied) => {
       console.log(applied.length ? `Applied: ${applied.join(', ')}` : 'Already up to date.');
+      if (appRolePassword) await provisionAppRoleLogin(url, appRolePassword);
       process.exit(0);
     })
     .catch((error: Error) => {

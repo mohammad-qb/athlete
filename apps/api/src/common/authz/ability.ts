@@ -23,7 +23,10 @@ export interface SubjectRows {
   userAcademyRoles: { userId: string };
 }
 
-type TaggedRow = { [S in Subject]: SubjectRows[S] & ForcedSubject<S> }[Subject];
+/** A row tagged with its subject type, per subject. Indexed by a generic `S` it stays assignable to `AppSubject`. */
+export type TaggedRows = { [S in Subject]: SubjectRows[S] & ForcedSubject<S> };
+
+type TaggedRow = TaggedRows[Subject];
 
 /**
  * A subject is named by its type (`'athletes'`) for route gates and query filters, or is
@@ -141,6 +144,8 @@ export function defineAbility(principal: Principal, mode: AbilityMode): AppAbili
 export function asSubject<S extends Subject>(
   type: S,
   row: SubjectRows[S],
-): SubjectRows[S] & ForcedSubject<S> {
-  return tagSubject(type, { ...row });
+): TaggedRows[S] {
+  // The two types are the same one; TypeScript cannot reduce a mapped type indexed by
+  // a generic key, so the identity is asserted here once rather than at every caller.
+  return tagSubject(type, { ...row }) as TaggedRows[S];
 }

@@ -7,6 +7,7 @@ import type {
   TransferAthleteRequest,
 } from '@athlete/contracts';
 import { TeamsRepository, type MembershipRow, type TeamRow } from './teams.repository';
+import { assertCan } from '../../common/authz/assert-can';
 
 @Injectable()
 export class TeamsService {
@@ -72,13 +73,27 @@ export class TeamsService {
     return { closed: toMembershipResponse(closed), opened: toMembershipResponse(opened) };
   }
 
+  /**
+   * `at` chooses WHICH period to show and is a query concern. Authorization is the team
+   * scope as it stands now: a coach reads any date of a roster they currently answer
+   * for, and no date of one they do not -- including a team they coached last month.
+   */
   async rosterAt(teamId: string, at: Date) {
+    // The team id is the scope key, so the refusal is a 403 and needs no read.
+    assertCan('read', 'teamMemberships', { teamId });
     await this.requireTeam(teamId);
-    return this.repository.rosterAt(teamId, at);
+    return this.repository.rosterAt(
+      teamId,
+      at,
+      this.repository.accessFilter('read', 'teamMemberships'),
+    );
   }
 
   private async requireTeam(teamId: string): Promise<TeamRow> {
-    const team = await this.repository.findTeam(teamId);
+    const team = await this.repository.findTeam(
+      teamId,
+      this.repository.accessFilter('read', 'teams'),
+    );
     if (!team) throw new NotFoundException(`Team ${teamId} not found`);
     return team;
   }
