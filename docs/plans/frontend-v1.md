@@ -169,7 +169,7 @@ docs before relying on any that is marked unverified):
   ```
   apps/web/src/
     routes/            URL params schema, guard, loader; renders a feature page
-    features/<name>/   components/ hooks/ index.ts   (index.ts is the only public surface)
+    features/<name>/   pages/ components/ hooks/ index.ts  (index.ts is the only public surface)
     components/ui/     shadcn primitives
     components/        shared composites (DataTable, ConflictDialog, AppSidebar, form fields)
     lib/               api client, error mapper, auth client, can(), query client, drafts

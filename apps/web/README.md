@@ -50,7 +50,7 @@ src/
     _app/index.tsx     redirects to the role's landing page
     _app/athletes.index.tsx
     _app/account.tsx
-  features/<name>/   components/ + index.ts; index.ts is the ONLY public surface
+  features/<name>/   pages/ (whole pages) + components/ (sections, small pieces) + index.ts; index.ts is the ONLY public surface
     auth/              sign-in page, change-password page
     athletes/          list page
   components/        shared composites
