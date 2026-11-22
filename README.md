@@ -27,6 +27,12 @@ regional kinetic event — in March 2026 two of three AWS UAE availability zones
 down together. The control for that is encrypted backups held out of country and out of
 provider, with a restore that has actually been performed and timed.
 
+The next tier of decisions is in
+[`docs/06-decision-summary.md`](./docs/06-decision-summary.md), including one that was
+**reversed** with the reason recorded (authorization: CASL was first rejected, then
+adopted). The decisions made while hardening the slice each have a record in
+[`docs/adr/`](./docs/adr/README.md).
+
 ---
 
 ## Architecture
@@ -39,13 +45,14 @@ flowchart TB
     end
 
     subgraph edge["Edge"]
-        fd["Front Door + WAF<br/>TLS, caching"]
+        fd["Front Door Standard<br/>TLS, rate limit, asset caching"]
     end
 
     subgraph api["apps/api — ONE deployable"]
-        mw["PrincipalMiddleware<br/>verify session → principal"]
-        guard["AuthorizationGuard<br/>DENY BY DEFAULT"]
-        itx["TenantTransactionInterceptor<br/>BEGIN + set_config(academy_id)"]
+        mw["AuthenticationGuard<br/>verify token → principal"]
+        guard["AuthorizationGuard<br/>DENY BY DEFAULT<br/>coarse ability: may this role ever?"]
+        val["ValidationInterceptor<br/>declared schemas or refusal"]
+        itx["TenantTransactionInterceptor<br/>BEGIN + set_config(academy_id)<br/>scoped ability: to which rows?"]
 
         subgraph modules["Feature modules"]
             direction LR
@@ -56,17 +63,17 @@ flowchart TB
 
         subgraph layers["Layers inside each module"]
             direction LR
-            ctl["controller<br/>HTTP + Zod only"] --> svc["service<br/>rules + tx boundary"] --> repo["repository<br/>the only SQL"]
+            ctl["controller<br/>HTTP: permission + schemas"] --> svc["service<br/>rules + instance checks"] --> repo["repository<br/>the only SQL<br/>access filter required"]
         end
     end
 
     subgraph data["Data"]
-        pg[("PostgreSQL 17<br/>RLS · exclusion constraints<br/>composite FKs · JSONB")]
+        pg[("PostgreSQL 17<br/>RLS · exclusion constraints<br/>composite FKs · JSONB<br/>grant matrix: no DELETE")]
     end
 
     contracts["packages/contracts<br/>Zod = single source of truth<br/>→ validation · OpenAPI · typed client"]
 
-    browser --> fd --> mw --> guard --> itx --> modules
+    browser --> fd --> mw --> guard --> val --> itx --> modules
     modules --> layers
     repo --> pg
     contracts -.-> browser
@@ -82,6 +89,11 @@ flowchart TB
 feature module reaches into a sibling's internals, or when anything outside a repository
 imports the database schema. Every legitimate exception to that last rule is written
 down in [`.dependency-cruiser.cjs`](./.dependency-cruiser.cjs) with its justification.
+Authorization is enforced the same way rather than remembered: one
+[CASL](https://casl.js.org) ability definition is the whole policy, a route with no
+declared permission is refused, and a repository read does not compile without the row
+filter derived from that policy
+([`docs/02-architecture.md`](./docs/02-architecture.md#authorization-one-policy-asked-two-ways)).
 
 **Its limitations, stated rather than discovered in review:** one deployable means one
 blast radius — a memory leak in reporting degrades attendance recording too. There is no
@@ -141,7 +153,8 @@ erDiagram
         uuid athlete_id FK "composite FK (academy_id,athlete_id)"
         timestamptz valid_from
         timestamptz valid_to "NULL = current"
-        tstzrange period "GENERATED; EXCLUDE gist(athlete,team,period)"
+        tstzrange period "GENERATED; EXCLUDE gist(athlete,team,period) WHERE not voided"
+        timestamptz voided_at "with voided_by: a wrong fact is voided, never deleted"
     }
     TEAM_COACH_ASSIGNMENTS {
         uuid id PK
@@ -163,6 +176,7 @@ erDiagram
         uuid team_id_at_time "context AS RECORDED, never recomputed"
         text status
         uuid client_record_id UK "UNIQUE(academy_id,client_record_id): offline replay"
+        timestamptz voided_at "with voided_by; one ACTIVE entry per athlete per session"
     }
     ASSESSMENTS {
         uuid id PK
@@ -173,7 +187,7 @@ erDiagram
     }
 ```
 
-Three properties to look for, all enforced below the application:
+Four properties to look for, all enforced below the application:
 
 1. `UNIQUE (academy_id, id)` on every parent, so children declare **composite** foreign
    keys. RLS prevents *reading* another academy's rows; this prevents *referencing* them.
@@ -203,43 +217,50 @@ Three properties to look for, all enforced below the application:
 sequenceDiagram
     autonumber
     participant C as Client
-    participant M as PrincipalMiddleware
+    participant A as AuthenticationGuard
     participant G as AuthorizationGuard
+    participant V as ValidationInterceptor
     participant I as TenantTxInterceptor
     participant S as Service
-    participant P as PolicyService
     participant R as Repository
     participant DB as Postgres
 
-    C->>M: PATCH /api/v1/athletes/:id<br/>Authorization + If-Match "3"
-    M->>M: verify session → principal{userId, academyId, roles}
-    M->>G: next()
-    G->>G: route metadata present?<br/>NO → 403 (deny by default)
-    G->>G: principal.roles ∩ spec.roles?<br/>empty → 403
-    G->>I: next()
+    C->>A: PATCH /api/v1/athletes/:id<br/>Authorization + If-Match "3"
+    A->>A: verify token → principal{userId, academyId, roles}<br/>attaches or not, never refuses
+    A->>G: next()
+    G->>G: @Permission or @Public declared?<br/>NO → 403 (deny by default)
+    G->>G: COARSE ability: can(update, athletes)?<br/>no conditions, no database · NO → 403
+    G->>V: next()
+    V->>V: parse params + body with the route's declared schemas<br/>unknown or empty → 400, no transaction opened
+    V->>I: next()
     I->>DB: BEGIN
-    I->>DB: select set_config('app.current_academy_id', $1, true)
+    I->>DB: select set_config('app.current_academy_id', $1, true), now()
     Note over I,DB: transaction-scoped: dies with the tx,<br/>cannot leak to the next pooled request
-    I->>S: handler inside AsyncLocalStorage{tx}
-    S->>P: assertCanAccessAthlete(id)
-    P->>R: active coach assignment covering now()?
-    R->>DB: SELECT ... (RLS applies: academy_id = app_current_academy())
-    DB-->>P: rows
-    P-->>S: ok / ForbiddenException
-    S->>R: updateIfVersionMatches(id, 3, patch)
-    R->>DB: UPDATE ... WHERE id=$1 AND academy_id=$2 AND version=3
+    I->>DB: coach only: active assignments, then active memberships, as of now()
+    DB-->>I: activeTeamIds, visibleAthleteIds (RLS applies)
+    I->>I: SCOPED ability: same rules, now with conditions
+    I->>S: handler inside AsyncLocalStorage{tx, ability}
+    S->>S: assertCan(update, athletes, {id})<br/>in memory, synchronous · out of scope → 403
+    S->>R: updateIfVersionMatches(id, 3, patch, accessFilter)
+    R->>DB: UPDATE ... WHERE id=$1 AND academy_id=$2 AND version=3<br/>AND id IN (visibleAthleteIds)
     DB-->>R: rowCount
     alt rowCount = 1
         R-->>S: updated row (version 4)
         S-->>C: 200 + ETag "4"
         I->>DB: COMMIT
     else rowCount = 0
-        S->>R: findById(id)
+        S->>R: findById(id, accessFilter)
         R-->>S: exists → stale
         S-->>C: 409 Conflict (stale_write)
         I->>DB: ROLLBACK
     end
 ```
+
+The same policy is asked twice, and that is the design: once before any query, without
+conditions, to decide whether the route is open to this role at all; once inside the
+tenant transaction, with the principal's teams and athletes resolved, to decide which
+rows. An administrator's access filter is empty (RLS is their only boundary), so the
+`AND id IN (...)` line exists only for a coach.
 
 ---
 
@@ -249,17 +270,17 @@ sequenceDiagram
 flowchart TB
     subgraph gh["GitHub"]
         repo["Repository"]
-        ci["Actions CI<br/>typecheck · boundaries · unit · integration"]
-        cd["Deploy<br/>OIDC federated — no stored secret"]
+        ci["Actions CI<br/>typecheck · lint · boundaries · unit<br/>integration · smoke · terraform checks"]
+        cd["Deploy (designed, not written)<br/>OIDC federated — no stored secret<br/>may write the app, not IAM or network"]
     end
 
     subgraph uaen["Azure UAE North (Dubai) — PRIMARY"]
         acr["Container Registry"]
-        mig["Migration job<br/>SEPARATE STEP, pre-deploy"]
+        mig["Migration job, inside the VNet<br/>SEPARATE STEP, pre-deploy"]
         ca["Container App<br/>API · min 2 replicas"]
-        pg[("PostgreSQL Flexible Server<br/>zone-redundant HA · PITR 35d")]
+        pg[("PostgreSQL Flexible Server<br/>VNet-only · zone-redundant HA · PITR 35d")]
         blob["Blob static website<br/>SPA bundle"]
-        fd["Front Door + WAF"]
+        fd["Front Door Standard<br/>rate limit only"]
         kv["Key Vault<br/>secrets + backup key"]
         obs["Log Analytics<br/>+ Application Insights"]
     end
@@ -288,7 +309,11 @@ flowchart TB
 
 Costs, RPO/RTO per failure scenario, and the answers to "budget cut 40%", "single
 server" and "50,000 athletes" are in
-[`docs/05-deployment.md`](./docs/05-deployment.md).
+[`docs/05-deployment.md`](./docs/05-deployment.md). Two labels in this diagram are
+deliberately modest: the edge is Front Door **Standard**, whose WAF is a single
+rate-limit rule and whose origins are also reachable directly; and the deploy pipeline
+is a designed sequence, not a written workflow. None of this infrastructure has been
+applied.
 
 ---
 
@@ -342,7 +367,9 @@ API_PORT=3100 ./scripts/smoke.sh
 
 ### Verified state of this repository
 
-Run on macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2, `postgres:17-alpine`:
+Run on 22 November 2026, in this order, on macOS, Node 24.14.1, pnpm 11.21.0, Docker
+28.3.2, `postgres:17-alpine`. Turborepo's cache was bypassed (`--force`) and the compose
+stack was started on a fresh volume:
 
 ```
 pnpm run typecheck                          ✓ no errors (5 tasks)
@@ -356,8 +383,8 @@ docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls
 ./scripts/smoke.sh (containerised stack)    ✓ 26/26 checks passed
 ```
 
-The smoke run, verbatim — note check 4, which is the same request as check 3 with a
-different academy's token:
+The smoke run, verbatim, from that fresh volume — note check 4, which is the same
+request as check 3 with a different academy's token:
 
 ```
 Liveness and deny-by-default
@@ -393,13 +420,16 @@ Validation (on by default; a 200 never means "nothing happened")
   PASS  misspelled field is refused                  400
   PASS  ...and names the field                       body:dateofBirth
   PASS  empty patch is refused                       400
-  PASS  the ETag did not move                        9 integer
+  PASS  the ETag did not move                        1 integer
   PASS  garbage query value is a 400                 400
   PASS  a valid instant is accepted                  200
   PASS  unknown query parameter refused              400
 
 All smoke checks passed.
 ```
+
+The script is re-runnable: a second run against the same volume also passes 26/26, with
+a higher integer on the ETag line.
 
 Every failure has the same shape, because a client should be able to write one error
 handler. The 409 body, which also has to tell the caller how to recover:
@@ -483,7 +513,7 @@ Each one exists to make a specific claim falsifiable.
 | `api-error.unit` | Every error type maps to the status and log severity the contract promises, the type list is exhaustive (adding one without a status fails here), and `toJSON` cannot serialise `cause` | — |
 | `error-responder.unit` | One log line per failure at its own severity; `meta` logged for 5xx and withheld for 4xx; an unexpected error is redacted to `"Internal server error"` while the **whole cause chain** reaches the log, bounded and cycle-guarded; a 5xx `HttpException` is redacted the same way, payload and all, so choosing a status is not a claim the message is publishable; a 4xx `HttpException` publishes its message and **nothing else** of its payload; an `http-errors` 4xx keeps its status only when it marked itself exposable; a response already begun is closed rather than crashed | — |
 
-### Three findings from actually running this
+### Four findings from actually running this
 
 The first version of the isolation suite **passed while reading across tenants.**
 
@@ -518,6 +548,19 @@ and path parameters validate against that same primitive rather than Nest's
 `ParseUUIDPipe` — so there is exactly one definition of a valid id, which was the point
 of `packages/contracts` in the first place.
 
+**4. The smoke script was proving tenant isolation as a superuser.**
+
+The compose stack's API connected as `postgres`. A superuser ignores row-level security
+(finding 1, again, one layer up), so every "tenant isolation over HTTP" check in the
+smoke script was passing on the repositories' own `academy_id` predicates, with RLS
+never applied. Nothing failed and nothing was logged.
+
+It was found the day the API gained a boot-time assertion about its own database role:
+the assertion refused the compose file's connection string. The API now connects as
+`athlete_app` everywhere, checks at start that it is not a superuser, not an owner and
+holds no privilege beyond its matrix, and exits otherwise. A guarantee that depends on
+which role you connect as needs something that checks the role.
+
 **Why this matters beyond the bugs:** findings 2 and 3 were invisible to 17 passing
 integration tests and caught by the smoke script in under a minute. Database
 tests and wiring tests catch different classes of defect. Keeping both is cheap; relying
@@ -538,11 +581,19 @@ Scope choices, each one a decision rather than an omission:
 - **Full CRUD across all entities.** Coaches, assessments and scheduling exist in the
   schema and the proposal, not in the API surface. Six shallow modules would prove less
   than one slice that carries every hard guarantee.
-- **Credential storage and session management.** Production uses a maintained auth
-  library (argon2id, refresh rotation, TOTP) with users and sessions in this same
-  Postgres. The slice implements token *verification* so the authorization and tenancy
-  paths are exercised with a real principal. Hand-rolling credential storage to pad a
-  case study would be the wrong signal.
+- **Credential storage and session management.** Production uses
+  [better-auth](https://www.better-auth.com) with users and sessions in this same
+  Postgres: memory-hard password hashing, revocable database sessions, TOTP as a
+  plugin. It is named, with its trade-off (a young, fast-moving library, so the version
+  is pinned and upgrades are owned), in
+  [`docs/01-technology-stack.md` §7](./docs/01-technology-stack.md#7-authentication--better-auth-users-in-our-own-postgres).
+  The slice implements token *verification* so the authorization and tenancy paths are
+  exercised with a real principal. Hand-rolling credential storage to pad a case study
+  would be the wrong signal.
+- **A void endpoint, and anything on assessments.** Voiding a wrongly recorded fact
+  works and is tested at the database, as the application role; no route does it. The
+  rule that a departed coach keeps the assessments they authored is designed and has
+  no route to apply to.
 - **OpenAPI generation and the generated client.** Specified in
   [`docs/01-technology-stack.md`](./docs/01-technology-stack.md); the Zod contracts it
   generates from are already the single source of truth in `packages/contracts`.
@@ -567,8 +618,8 @@ Scope choices, each one a decision rather than an omission:
 ```
 apps/
   api/                  NestJS — the one deployable
-    drizzle/            hand-written SQL migrations (schema, then RLS)
-    src/common/         tenancy, authz, errors, HTTP concerns
+    drizzle/            hand-written SQL migrations (schema, RLS, then grants)
+    src/common/         tenancy, authz, validation, errors, HTTP concerns
     src/modules/        athletes · teams · sessions · auth
     test/               unit + Testcontainers integration
   web/                  SPA build target (deliberately minimal)
@@ -581,6 +632,9 @@ infra/terraform/        Azure UAE North / UAE Central
   modules/              container-app, postgres, static-site, edge
   stacks/               shared (CI identity, state) · <env>/base (human-applied) · <env>/app (CI-applied)
 docs/                   the written proposal (A–E of the brief)
+  adr/                  decision records for the hardening work
+  reference/            the generated route manifest
+  plans/                the phase-by-phase build record, deviations included
 scripts/                smoke check, demo seed, dev token minting
 apps/api/Dockerfile     multi-stage, non-root, prod deps only
 docker-compose.yml      local dev AND the single-server deployment answer

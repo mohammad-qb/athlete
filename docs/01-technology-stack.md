@@ -17,10 +17,12 @@
 | Data access | **Drizzle ORM** | SQL-first; migrations are editable `.sql`, which the guarantees require |
 | API | **REST + OpenAPI generated from Zod** | Readable without running it; `ETag`/`Idempotency-Key` are native; integrations free |
 | Client | **React + Vite SPA, static** | Keeps production at ONE Node process |
-| Auth | **Self-hosted auth library, own Postgres** | Identity PII stays in the UAE; flat cost |
+| Auth | **better-auth, self-hosted, own Postgres** | Identity PII stays in the UAE; flat cost |
+| Authorization | **CASL ability + a small condition→SQL compiler** | One policy gates routes and filters queries; see [02](./02-architecture.md) |
 | Hosting | **Azure UAE North + UAE Central** | Only provider with in-country primary *and* in-country DR |
 | IaC | **Terraform** | Keeps the portability claim credible |
 | Observability | **OpenTelemetry → Application Insights** | Telemetry stays in-region; vendor-neutral instrumentation |
+| Tooling | **Zod, Vitest, type-aware ESLint** | Each replaces a framework default on a stated ground; see [§10](#10-tooling-defaults-named) |
 
 ## 1. Runtime and framework — NestJS + TypeScript
 
@@ -151,19 +153,53 @@ there is no SEO requirement and no public page, so SSR would buy nothing concret
 Responsive web covers phones. Native mobile is deferred with a documented Expo path that
 reuses `packages/contracts`.
 
-## 7. Authentication — self-hosted library, users in our own Postgres
+## 7. Authentication — better-auth, users in our own Postgres
 
-**Why.** Two hard constraints decide this. **Residency**: Clerk and Auth0 have no UAE
-region, so either would move identity PII out of the country and falsify the hosting
-claim. **Cost**: at ~5,300 users growing to 50,000, per-MAU pricing is a real line item
-where self-hosting is flat. A third reason is modelling: academy-scoped roles
+**Why self-hosted.** Two hard constraints decide this. **Residency**: Clerk and Auth0
+have no UAE region, so either would move identity PII out of the country and falsify the
+hosting claim. **Cost**: at ~5,300 users growing to 50,000, per-MAU pricing is a real
+line item where self-hosting is flat. A third reason is modelling: academy-scoped roles
 (`user_academy_roles`) map cleanly onto our own schema, where a generic IdP's
 organisation model would need bending.
 
-**The objection, answered directly:** this is not hand-rolled authentication. A
-maintained library handles argon2id hashing, session rotation and TOTP. What is
-deliberately *not* built: SSO, social login and SCIM — because no requirement asks for
-them.
+**The library is [better-auth](https://www.better-auth.com).** "A maintained library"
+is not an answer a reviewer can check, so it is named. What it brings, and what was
+confirmed rather than assumed:
+
+- **It is alive.** Checked on 22 November 2026: the 1.7 line is current on npm, released
+  within days of the check, with a 1.8 beta in progress. The check was not a
+  formality. **Lucia**, the library this paragraph would have named two years ago, was
+  deprecated as a library by its author in 2025 and now exists as a guide to writing
+  sessions yourself. A dead dependency in a technology proposal is worse than no name.
+- **Its tables live in our Postgres**, through its Drizzle adapter, created by our own
+  hand-written migrations like every other table. Sessions are database rows, not
+  self-contained JWTs, so a session can be revoked and "sign out everywhere" is a
+  `DELETE`.
+- **Password hashing is scrypt by default**, not argon2id. Both are memory-hard and
+  acceptable; argon2id is the current OWASP first choice and is available by supplying
+  the library's hash and verify functions. An earlier draft of this proposal said
+  "argon2id" as if it came in the box. It does not, and the configuration is one more
+  thing we own.
+- **TOTP** is a first-party plugin (with backup codes), enabled when a requirement asks.
+
+**The trade-off, stated.** better-auth reached 1.0 in late 2024. It is young, it
+releases often, and its minor versions remove things (the 1.7 notes deprecate an
+endpoint for removal in the next minor). So: the version is pinned exactly, upgrades
+are a reviewed change with the changelog read, and the risk of a breaking or abandoned
+release is ours. The exit is bounded because the data is ours: users, credentials and
+sessions sit in tables we migrate, so replacing the library is a code change, not a
+data migration out of someone else's service.
+
+**What is deliberately not built:** SSO, social login and SCIM, because no requirement
+asks for them.
+
+**Not integrated in this repository.** The slice verifies a signed token and builds a
+principal; it stores no credential and manages no session (see the README's "not
+built" list). Integration has one known piece of design left: the application role
+`athlete_app` holds no privilege on `users` at all
+([ADR 0004](./adr/0004-privilege-matrix-and-voiding.md)), so the auth library needs
+either its own database role or a narrow, explicit grant. That is a decision to make
+when it is wired in, not one this proposal pretends is already made.
 
 **AWS Cognito** — would keep residency if available in-region, but has poor developer
 experience and hard-couples to AWS. **Keycloak** — full OIDC in-country, but an entire
@@ -187,3 +223,82 @@ leaves the UAE in readable form* — is worth more than better exception triage.
 
 **Self-hosted Grafana/Prometheus/Loki** — rejected: an entire second system for a small
 team to run, and if it shares a region with the app it dies in the same event.
+
+## 10. Tooling defaults, named
+
+Three places where the framework's default tool was not used. Each is a default, so
+each needs the same treatment as the larger choices: the alternative named, and the
+ground stated.
+
+### Validation — Zod, not class-validator + class-transformer
+
+Nest's documentation validates with decorated DTO classes. They are rejected here on
+four grounds, in order of how checkable they are.
+
+1. **CI forbids the shape they require.** A PATCH body is "the create shape, every
+   field optional". With class DTOs that is `PartialType(CreateAthleteDto)`, and
+   `PartialType` comes from `@nestjs/mapped-types`. `packages/contracts` is shared with
+   the browser, and the `contracts-stay-pure` boundary rule fails the build on any
+   `packages/contracts → @nestjs/*` import. So with class DTOs every patch shape either
+   breaks that rule or is written out a second time by hand. With Zod it is
+   `patchOf(schema)`: derived, in the shared package, with no framework import.
+2. **No inference.** A decorated class is a type and a set of rules that agree only
+   because someone kept them in step: `@IsString()` on a property typed `number`
+   compiles. A Zod schema is the rule, and `z.infer` is the type.
+3. **A runtime requirement the rest of the stack does not have.** class-validator needs
+   `class-transformer` to turn a plain body into a class instance, plus
+   `reflect-metadata` and `emitDecoratorMetadata`. Nest's own dependency injection
+   already needs the last two in `apps/api`; the shared package and the SPA do not, and
+   would acquire them.
+4. **Sharing does not work in either direction.** Import the DTO classes into the SPA
+   at runtime and the decorators and their metadata runtime ship to the browser. Import
+   them as types only and nothing is validated on the client at all.
+
+What is **not** claimed: that class-validator cannot express refinements, unions or
+cross-field rules. It can, through custom constraint classes. The argument is about
+where the definition lives and what it drags with it, not about expressiveness.
+
+**Trade-off accepted.** Nest's built-in `ValidationPipe` and the Swagger plugin's DTO
+introspection are given up. Validation is instead a declared route property
+(`@Validate`) read by one global interceptor, which fails closed when a route forgets
+it ([02](./02-architecture.md#cross-cutting-concerns-and-where-each-one-lives)), and
+the OpenAPI document is to be generated from the same Zod schemas.
+
+### Test runner — Vitest, not Jest
+
+Nest's CLI scaffolds Jest. Vitest was chosen because it runs TypeScript and ES modules
+without a transform layer to configure (`ts-jest` or Babel, each with its own module
+settings to keep in step with `tsconfig`), and because a sub-second unit run is what
+makes "run the tests" a habit rather than a step.
+
+**The cost is real and was paid.** Vitest compiles with esbuild, which does not emit
+decorator metadata, so Nest's injector cannot construct this application's real
+controllers under test. Two consequences are visible in the suite: the HTTP-level
+validation spec runs against a fixture controller whose providers are built by
+factory, and
+the real routes are held to their declarations by a static walk of the module graph
+(`authz.route-coverage`) plus the smoke script over the running container. If a test
+ever needs the real application booted in-process, the route is an SWC transform for
+Vitest. Jest with `ts-jest` would not have had this problem. It was judged a fair
+price, and it is written here because it is the first thing a Nest developer will trip
+on.
+
+### Lint — typescript-eslint with type information, not a syntax-only linter
+
+The gate exists for one rule. An authorization assertion that returns a promise and has
+lost its `await` type-checks, returns 200, and skips the check. This was demonstrated,
+not supposed: removing the `await` passed `typecheck` and failed `lint`. Only
+`no-floating-promises` catches it, and that rule needs the TypeScript checker's types.
+So ESLint runs with `projectService` on, and `no-floating-promises`,
+`no-misused-promises` and `require-await` are errors
+([`tooling/eslint-config`](../tooling/eslint-config/README.md)).
+
+Faster linters were the alternative: **Biome** and **oxlint** are both far quicker.
+They were not chosen because the one rule that matters has to agree with the compiler
+about what is a promise, and at the time of writing neither runs on the TypeScript
+checker itself. The price is a lint pass that costs about as much as a type-check. It
+is cached by Turborepo and runs pre-commit on staged packages only.
+
+There is **no formatter** in the repository. Prettier is the default companion and
+adding it is a repo-wide diff that proves nothing in a proposal; a team adopting this
+would add one on day one.

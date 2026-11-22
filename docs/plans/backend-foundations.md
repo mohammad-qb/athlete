@@ -1,5 +1,12 @@
 # Backend foundations: authorization, errors, validation, privileges
 
+> **Status: complete (2026-11-22).** All seven phases are done. This document is kept
+> as the record of why the phases exist, what each one found, and where it deviated.
+> The lasting decisions now live in [`docs/adr/`](../adr/README.md) and in the proposal
+> itself (`docs/01`–`06`); read those for what the system does, and this for how it
+> got there. Decisions left open for the owner are listed under
+> [phase 7's deviations](#deviations-6).
+
 **Goal.** When this plan is done, `apps/api` has four load-bearing subsystems that are
 enforced rather than documented: a CASL ability as the single authorization policy (coarse
 check in the guard, row filters in repositories), a first-class `ApiError` taxonomy with one
@@ -24,10 +31,11 @@ sync client, no OpenAPI client generation beyond the document itself, and no mov
 | 4 | Database privileges + fact immutability | done |
 | 5 | Validation on by default | done |
 | 6 | Terraform restructure + secrets | done |
-| 7 | Docs, ADRs, verified state | not started |
+| 7 | Docs, ADRs, verified state | done |
 
-**Current phase:** 6 — done (5 and 6 were delivered together).
-**Recommended next phase:** 7.
+**Current phase:** 7 — done. The plan is complete.
+**Recommended next phase:** none. Follow-ups that are not part of this plan are listed
+under phase 7's deviations.
 
 Phase 6 touches no application code and may run in parallel with 2–5 if two sessions are
 available; every other phase depends on the one before it.
@@ -973,11 +981,11 @@ number in the README reproduces. Last phase by necessity: it describes what exis
 
 **Tasks.**
 
-- [ ] docs/01 §10 + §7 (library status verified first)
-- [ ] docs/06 decision 9 rewritten; docs/02 updated
-- [ ] `docs/adr/` seeded with the phase decisions
-- [ ] README verified-state block, transcript and tests table refreshed from a real run
-- [ ] plan marked complete; lasting facts relocated
+- [x] docs/01 §10 + §7 (library status verified first)
+- [x] docs/06 decision 9 rewritten; docs/02 updated
+- [x] `docs/adr/` seeded with the phase decisions
+- [x] README verified-state block, transcript and tests table refreshed from a real run
+- [x] plan marked complete; lasting facts relocated
 
 **Exit criteria.**
 
@@ -987,5 +995,59 @@ number in the README reproduces. Last phase by necessity: it describes what exis
   recorded facts are protected by `ON DELETE RESTRICT` without naming the parents that cascade.
 - `grep -ri "casl" docs/ README.md` shows adoption, not rejection.
 
+**Verified on 2026-11-22** (macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2,
+`postgres:17-alpine`), in the README's order, with Turborepo's cache bypassed
+(`--force`): typecheck 5 tasks; `lint` 6 tasks plus the root pass; `lint:boundaries` no
+violations (59 modules, 127 dependencies); build 3 tasks; unit 180 passed (11 files);
+integration 67 passed (7 files). The compose stack was run as a second project
+(`COMPOSE_PROJECT_NAME=athlete-verify`, its own ports) on a fresh volume, so the
+developer's running stack was not touched: `migrate` printed `Applied: 0000_init.sql,
+0001_rls.sql, 0002_grants.sql`; `smoke.sh` 26/26, twice. No number in the README
+changed; the transcript's ETag line now shows the fresh-volume value. The 409, 400 and
+two 403 bodies quoted in the docs were read from live responses. Relative links and
+heading anchors in README, `docs/` and `docs/adr/` were checked by script.
+**Not verified:** the Mermaid diagrams were edited and not rendered; Terraform was not
+re-run (phase 6's results stand, no `.tf` file changed).
+
 ### Deviations
-_(none yet)_
+- **The prod SKU decision was taken as "keep HA and re-cost"**, the state the
+  Terraform was already in. docs/05's sizing row, cost table and 40% answer were
+  redone for `GP_Standard_D2ds_v4`. **The new database figures are estimates** (list
+  price in a cheaper region plus the regional premium, HA priced as a second server),
+  not read from the Azure calculator for UAE North, and docs/05 says so. Launch total
+  moved from ~$290–410 to ~$430–560, and the 40% answer changed in substance: a
+  reservation alone no longer reaches it; reservation plus dropping HA does. To take
+  the other branch instead, revert three lines in `stacks/prod/base/locals.tf` and the
+  docs/05 rows. The 10× cost column was not re-derived.
+- **better-auth: verified alive, and two claims about it corrected.** npm showed the
+  1.7 line released within days and a 1.8 beta. Its default password hash is scrypt,
+  not argon2id (argon2id needs custom hash/verify functions), and its sessions are
+  database rows rather than rotating refresh tokens, so "argon2id, refresh rotation"
+  was removed from README and docs/05. The scrypt default is from the library's
+  security reference via search; the custom-hash hook and the "1.0 in late 2024" date
+  were not checked against primary sources.
+- **The condition→SQL layer is described as ~300 lines, not the ~150 this plan
+  predicted**: `to-sql-where.ts` 239 + `accessible-by.ts` 59, comments included.
+- **docs/06 gained decisions 16–20** (one row per ADR-level decision) and two open
+  questions for the client (may a coach edit athletes; is HA worth its line).
+- **Five ADRs, as listed; validation and the lint gate did not get their own.** They
+  are argued in docs/01 §10 and docs/03 §4, and `docs/adr/README.md` says so.
+- **docs/03, 04 and 05 were edited beyond the plan's list**, because the exit
+  criterion is "no claim describes behaviour the code does not have": the cascade
+  claim, a voiding section and the grant matrix (03); environments renamed to what
+  the stacks are, the CI/CD flow split into "runs today" and "not written", the
+  security table, the edge qualified as Front Door Standard with a rate limit (05).
+- **README: the request-path and architecture diagrams were redrawn** (they still
+  showed `PolicyService` and a `PrincipalMiddleware` that had been a guard since the
+  first findings), a fourth "finding from running this" was added (defect 7), and
+  "not built" gained the void endpoint and assessments.
+- **docs/02 states one thing as designed-not-built that it used to imply was built:**
+  a departed coach keeping access to assessments they authored. `assessments` is a
+  reserved subject with no rule and no route.
+- **ADR 0001 records an unfinished edge:** services still throw Nest's
+  `NotFoundException`/`BadRequestException` in places. The filters normalise them to
+  the same body, but they carry no `code`.
+- **Follow-ups outside this plan:** apply the Terraform to a real subscription; write
+  the deploy workflow, backup job and restore drill; integrate better-auth (needs a
+  decision on its database role, since `athlete_app` has nothing on `users`); a void
+  endpoint with an HTTP mapping for the final-once-set refusal; generate OpenAPI.

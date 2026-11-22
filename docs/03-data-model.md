@@ -3,8 +3,11 @@
 See the [ERD](../README.md#data-model) and the
 [request-path sequence diagram](../README.md#request-path--where-tenancy-and-authorization-actually-happen).
 
-Authoritative DDL: [`apps/api/drizzle/0000_init.sql`](../apps/api/drizzle/0000_init.sql)
-and [`0001_rls.sql`](../apps/api/drizzle/0001_rls.sql).
+Authoritative DDL: [`apps/api/drizzle/0000_init.sql`](../apps/api/drizzle/0000_init.sql),
+[`0001_rls.sql`](../apps/api/drizzle/0001_rls.sql) and
+[`0002_grants.sql`](../apps/api/drizzle/0002_grants.sql). Migrations are forward-only:
+`0002` supersedes parts of the first two rather than editing them, and where a snippet
+below shows a constraint, it is the constraint as it stands after all three.
 
 ## 1. Preventing unauthorized access between academies
 
@@ -45,7 +48,9 @@ context returns *nothing* — it does not return *everything*.
    and it **never** applies to a superuser or any `BYPASSRLS` role. The application
    connects as `athlete_app`: non-owner, `NOBYPASSRLS`. The test suite asserts that
    premise before asserting anything else, because the first version of it passed while
-   reading across tenants.
+   reading across tenants. The API asserts it too, at boot, and refuses to start as
+   anything else — because the local compose stack was later found doing the same
+   thing over HTTP.
 2. **The login bootstrap problem.** Authentication must find a user before any academy
    is chosen. Rather than weaken RLS, exactly one `SECURITY DEFINER` function with a
    pinned `search_path` provides that lookup, returning role assignments only — never
@@ -96,6 +101,7 @@ period      tstzrange generated always as
 
 constraint team_memberships_no_overlap_same_team
   exclude using gist (athlete_id with =, team_id with =, period with &&)
+  where (voided_at is null)        -- a voided membership stops occupying its period
 ```
 
 **The constraint's scope is a deliberate domain decision.** An athlete *may* belong to
@@ -124,11 +130,83 @@ would rewrite last month's attendance sheet — and nobody would notice until an
 disputed a report. Recording participation as a fact, carrying the team context of the
 moment, makes that impossible.
 
-`ON DELETE RESTRICT` on recorded facts: a register that can be emptied by deleting a
-parent row is not a historical record.
+**A fact cannot be removed through its parent.** A register that can be emptied by
+deleting a parent row is not a historical record, so the foreign keys from recorded
+facts to their parents are `ON DELETE RESTRICT`: `session_participants →
+training_sessions`, and `team_memberships → teams` and `→ athletes`. This sentence was
+in the first version of this document and was **not true**: those three cascaded until
+`0002_grants.sql`, so deleting a session emptied its register. What still cascades, on
+purpose: `academy_id → academies` on every table (offboarding a tenant removes the
+tenant), and `teams → training_sessions` and `→ team_coach_assignments`, which are not
+recorded facts — a session that *has* a register is protected by the first constraint.
 
 Assessments are **append-only** (no `version` column): they are not edited, they are
-superseded. `assessed_by_user_id` is what lets a departed coach still read their own work.
+superseded. `assessed_by_user_id` is what will let a departed coach still read their own
+work; that rule is designed and not built, since no route serves assessments in this
+slice.
+
+### Correcting a fact: void and replace
+
+A fact recorded wrongly is neither edited nor deleted. It is marked void — by someone,
+at a time — and a correct row is inserted beside it, so the wrong version stays on
+record as wrong.
+
+```sql
+voided_at timestamptz,
+voided_by uuid references users(id) on delete restrict,
+constraint session_participants_void_attributed
+  check ((voided_at is null) = (voided_by is null))   -- no anonymous void
+```
+
+on `session_participants`, `assessments` and `team_memberships`. Three things had to
+change for a replacement row to be possible and for a void to mean anything:
+
+- "One register entry per athlete per session" became a **partial unique index**
+  `where voided_at is null`. Postgres cannot put a `WHERE` on a unique *constraint*,
+  and the unconditional one made a replacement impossible.
+- The membership exclusion constraint gained the same predicate.
+- Every read of a fact, including the query that resolves a coach's scope, goes through
+  one shared active-row predicate. A voided membership grants no access.
+
+The idempotency constraint on `(academy_id, client_record_id)` stays unconditional on
+purpose: a replayed offline submission must remain a no-op even if the row it first
+created was later voided. A replacement is a new record with a new `client_record_id`.
+
+**No route voids anything yet.** The correction path is proven at the database, as the
+application role (`privileges.matrix.integration`); a void endpoint is product surface
+this slice does not add.
+
+### The privilege matrix
+
+The application's database role cannot do what the application should never ask.
+`0001` granted `athlete_app` full DML on every table and made that the default for
+every future table; `0002` revokes both and grants back table by table.
+
+| Tables | Granted to `athlete_app` |
+|---|---|
+| `athletes`, `teams`, `training_sessions` | `SELECT`, `INSERT`, `UPDATE` |
+| `session_participants`, `assessments` | `SELECT`, `INSERT`, `UPDATE (voided_at, voided_by)` |
+| `team_memberships` | `SELECT`, `INSERT`, `UPDATE (valid_to, voided_at, voided_by)` |
+| `team_coach_assignments` | `SELECT`, `INSERT`, `UPDATE (valid_to)` |
+| `academies`, `user_academy_roles` | `SELECT` |
+| `users`, `_migrations`, any future table | nothing |
+
+- **No `DELETE` on any table.** Nothing in the API deletes.
+- **`status` on a register entry is not updatable.** Editing a status in place is
+  exactly what voiding replaces.
+- **A column grant says which column, not which transition**, so a trigger
+  (`app_final_once_set`) makes `valid_to` and the voiding columns go from `NULL` to a
+  value exactly once for any role that does not own the table. Without it the
+  application role could reopen a closed coach assignment — restoring that coach's
+  access — or clear `voided_at` to bring a voided fact back. The owner is exempt, so
+  the platform can still repair a row under a different identity.
+- **`users` gets nothing** because it holds `password_hash` and, having no
+  `academy_id`, has no RLS policy: `SELECT` on it would expose every tenant's
+  credentials to any statement running as the application role.
+
+Tested in `privileges.matrix.integration.spec.ts`, inside the tenant, as the
+application role; and checked by the API at boot, which refuses to start holding more
+than this table (`database-privileges.ts`).
 
 Proven end to end by `history.transfer.integration.spec.ts`: record attendance →
 transfer the athlete → February's register and roster are unchanged, today's roster
@@ -178,18 +256,31 @@ which is what lets a future offline mobile client ship without redesigning this 
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/athletes` | Tenant-scoped by RLS |
+| `GET` | `/athletes` | Tenant-scoped by RLS; a coach sees the athletes on teams they coach now |
 | `GET` | `/athletes/:id` | Returns `ETag` |
 | `POST` | `/athletes` | |
-| `PATCH` | `/athletes/:id` | Requires `If-Match`; 409 on stale |
+| `PATCH` | `/athletes/:id` | Requires `If-Match`; 409 on stale; an unknown or empty body is a 400, never a silent 200 |
 | `POST` | `/teams` | |
 | `POST` | `/teams/:id/memberships` | Period, not assignment |
-| `GET` | `/teams/:id/roster?at=<iso>` | `at` defaults to now — the same endpoint answers "who is" and "who was" |
+| `GET` | `/teams/:id/roster?at=<iso>` | `at` defaults to now — the same endpoint answers "who is" and "who was". `at` must be an ISO-8601 instant with an offset. It chooses the period shown; authorization is the caller's team scope *today* |
 | `POST` | `/teams/transfers` | Close one period, open another |
 | `POST` | `/sessions` | |
 | `POST` | `/sessions/:id/attendance` | Idempotent; validates membership *as at session start* |
 | `GET` | `/sessions/:id/attendance` | The recorded register |
 | `GET` | `/health` | The only `@Public()` route |
 
-Validation errors return field-level issues; authorization failures return a real 403
-naming the required roles, not an empty list.
+What each route demands of the caller is in the generated
+[route manifest](./reference/route-manifest.md).
+
+**Every request part is validated or refused.** Each route declares a schema for the
+params, query and body it reads; unknown keys are rejected; and a handler that reads a
+part it declared no schema for is refused rather than handed raw input. A PATCH that
+names no recognised field is a 400 — it used to validate to `{}`, return 200 and bump
+the version, invalidating every other client's `ETag` while changing nothing.
+
+**Every failure has one body shape**: `type` (the stable category: `VALIDATION`,
+`FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, …), an optional `code` for the specific failure,
+`message`, and machine-readable `meta` — for validation, `meta.fields` with each entry's
+`in` (`params | query | body`), dot `path` and messages. An authorization failure is a
+real 403 naming the operation refused, not an empty list; an unexpected failure is
+redacted to `"Internal server error"` and its cause logged.
