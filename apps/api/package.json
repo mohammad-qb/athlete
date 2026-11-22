@@ -8,7 +8,7 @@
     "lint": "eslint --max-warnings 0 .",
     "start": "node dist/main.js",
     "start:dev": "ts-node-dev --respawn src/main.ts",
-    "test": "vitest run --dir test unit route-coverage",
+    "test": "vitest run --dir test unit route-coverage validation.http",
     "test:integration": "vitest run --dir test integration",
     "migrate": "ts-node src/db/migrate.ts"
   },

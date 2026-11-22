@@ -24,6 +24,14 @@ import { resolveApiErrorType } from './status-type';
  * wire -- and being matched by this filter rather than the catch-all is not a statement
  * that the message is client-safe, only that someone chose a status. The message
  * survives as `cause` in the log.
+ *
+ * Only the message is published, never the rest of the payload. An `HttpException`
+ * can be constructed with any object, and nothing says its keys were meant for the
+ * client: a guard or a third-party module that attaches internal state to a 4xx would
+ * otherwise have it forwarded verbatim (which is what Nest's default filter does).
+ * Structured, client-facing detail has exactly one route to the wire -- `ApiError`'s
+ * `meta`, where whoever throws it chose it on purpose. The payload is not lost: the
+ * exception is the `cause`, and the log carries it.
  */
 @Catch(HttpException)
 export class HttpExceptionFilter implements ExceptionFilter {
@@ -39,10 +47,6 @@ export class HttpExceptionFilter implements ExceptionFilter {
         {
           type: resolveApiErrorType(statusCode),
           statusCode,
-          // `meta` is the payload the thrower attached. For a 4xx that is structured
-          // client-facing detail; for a 5xx it is internal state, and the responder
-          // logs 5xx `meta` anyway, so dropping it here loses nothing but the leak.
-          meta: serverFault ? undefined : this.extractMeta(exception),
           cause: exception,
         },
       ),
@@ -67,28 +71,5 @@ export class HttpExceptionFilter implements ExceptionFilter {
       if (Array.isArray(message)) return message.map(String).join('; ');
     }
     return exception.message;
-  }
-
-  /**
-   * Carries forward the structured detail a 4xx exception was thrown with -- the Zod
-   * issue list, a conflict's expected version -- so normalising does not flatten a
-   * body that was already machine-readable into a bare sentence.
-   *
-   * Nest's own three keys are dropped: `message` and `error` are the prose fields and
-   * are already represented above, and `statusCode` is a top-level field of the
-   * response -- repeating it inside `meta` would be the only content of `meta` for
-   * every stock Nest exception.
-   */
-  private extractMeta(exception: HttpException): Record<string, unknown> | undefined {
-    const response = exception.getResponse();
-    if (typeof response !== 'object' || response === null) return undefined;
-
-    const {
-      message: _message,
-      error: _error,
-      statusCode: _statusCode,
-      ...rest
-    } = response as Record<string, unknown>;
-    return Object.keys(rest).length > 0 ? rest : undefined;
   }
 }

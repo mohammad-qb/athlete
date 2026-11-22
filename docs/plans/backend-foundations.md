@@ -22,12 +22,12 @@ sync client, no OpenAPI client generation beyond the document itself, and no mov
 | 2 | Authorization model (CASL + SQL compiler) | done |
 | 3 | Enforce scoping (the live hole) | done |
 | 4 | Database privileges + fact immutability | done |
-| 5 | Validation on by default | not started |
-| 6 | Terraform restructure + secrets | not started |
+| 5 | Validation on by default | done |
+| 6 | Terraform restructure + secrets | done |
 | 7 | Docs, ADRs, verified state | not started |
 
-**Current phase:** 4 — done (3 and 4 were delivered together).
-**Recommended next phase:** 5.
+**Current phase:** 6 — done (5 and 6 were delivered together).
+**Recommended next phase:** 7.
 
 Phase 6 touches no application code and may run in parallel with 2–5 if two sessions are
 available; every other phase depends on the one before it.
@@ -164,14 +164,15 @@ import that habit.
    `ON DELETE CASCADE`, so deleting a parent empties a register the README claims is protected.
    Phase 4 — **closed**.
 4. `PATCH /athletes/:id` with a misspelled field validates to `{}` and returns **200 with a
-   bumped ETag having changed nothing**, invalidating every other client's ETag. Phase 5.
+   bumped ETag having changed nothing**, invalidating every other client's ETag.
+   Phase 5 — **closed**.
 5. A dropped `await` on a policy assertion silently skips authorization; no test would catch it.
    Phase 1 (`no-floating-promises`) — **closed**.
 6. `GET /teams/:id/roster?at=<garbage>` builds `new Date('garbage')` and hands an Invalid
    Date to the driver, so an unvalidated query parameter produces a **500**. Found while
    verifying phase 1's catch-all filter. The redaction holds (the client learns nothing,
    the log carries the SQL), but a client error is being reported as a server fault.
-   Phase 5 — it is the query-schema half of defect 4, and `@Validate({ query })` closes it.
+   Phase 5 — **closed**: it was the query-schema half of defect 4.
 7. The compose stack's API connected as the **`postgres` superuser**, so RLS was not
    applied to any request the smoke script made: every "tenant isolation over HTTP" check
    passed on the repositories' `academy_id` predicates alone. Found in phase 4, when the
@@ -728,12 +729,12 @@ Closes defect 4.
 
 **Tasks.**
 
-- [ ] `@Validate` + interceptor + bag
-- [ ] three fail-closed param decorators; per-parameter pipes removed
-- [ ] `strictObject` + non-empty-patch refinement across contracts
-- [ ] validation errors folded into the `ApiError` taxonomy
-- [ ] body-schema coverage assertion + HTTP-level spec
-- [ ] smoke check for the silent-no-op bug
+- [x] `@Validate` + interceptor + bag
+- [x] three fail-closed param decorators; per-parameter pipes removed
+- [x] `strictObject` + non-empty-patch refinement across contracts
+- [x] validation errors folded into the `ApiError` taxonomy
+- [x] body-schema coverage assertion + HTTP-level spec
+- [x] smoke check for the silent-no-op bug
 
 **Exit criteria.**
 
@@ -743,8 +744,62 @@ Full command block green, plus:
   (this is a 200 with a bumped ETag today).
 - Removing `@Validate` from a route makes the HTTP spec fail.
 
+**Verified on 2026-11-22** (macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2,
+`postgres:17-alpine`): typecheck 5 tasks clean; `lint` 6 tasks clean; `lint:boundaries`
+no violations (59 modules, 127 dependencies); unit 180 passed (11 files); integration 67
+passed (7 files, untouched); `smoke.sh` 26/26, run twice against the same volume. Over
+HTTP the misspelled PATCH, sent with the *current* ETag, returns 400 naming
+`body:dateofBirth` and the ETag is the same integer afterwards; `?at=garbage` returns
+400 naming `query:at` where it returned 500. The mutation checks were run: deleting
+`@Validate` from `AthletesController.update` fails three route-coverage tests (plus the
+manifest), and swapping `@ValidBody()` for `@Body()` fails a fourth.
+
 ### Deviations
-_(none yet)_
+- **Removing `@Validate` from a real route fails the route-coverage spec, not the HTTP
+  spec.** The HTTP spec runs a fixture controller, because Vitest compiles with esbuild,
+  which emits no decorator metadata, so the real controllers cannot be constructed by
+  Nest's injector under test. What it proves is the mechanism: a handler that reads a
+  slot with no declared schema answers 500 and is never invoked. The real routes are
+  held to it statically (below) and by the smoke script.
+- **Coverage is asserted on every slot, not only bodies.** Besides "every route taking a
+  body declares a body schema": no handler binds Nest's `@Body`/`@Param`/`@Query`; every
+  slot a handler reads through `@Valid*` is declared; every `:param` route declares a
+  params schema; every declared schema refuses an unknown key. The manifest gained a
+  "Validates" column.
+- **An undeclared slot is a 500 (`validation_not_declared`), not a 4xx.** The mistake is
+  the server's; the client gets the blanket message and the log names the handler and
+  the fix.
+- **`meta.fields` entries carry `in` (`params | query | body`)** beside `path` and
+  `messages`. All declared slots are parsed before anything is thrown, so one response
+  can report an `id` in the path and an `id` in the body, and `path` alone cannot tell
+  them apart. An unknown key is reported as its own field (`path: 'dateofBirth'`,
+  `"Unrecognized field"`) rather than as Zod's single issue on the parent.
+- **The validation interceptor is registered before the tenant-transaction
+  interceptor**, so a malformed request never opens a transaction. Guards still run
+  first: an unauthenticated caller gets 401, not a schema.
+- **`patchOf(schema)` is the patch helper**, in `primitives.ts` beside `strictObject`
+  (which is `z.strictObject`, exported under one name so request schemas have one
+  constructor to grep for). Its "at least one field" refinement is skipped when the
+  body already has field errors, so a body holding only a misspelled key is told about
+  the key and nothing else. `IdParams` and `RosterQuery` are new contracts.
+- **`RosterQuery.at` requires an offset** (`2026-01-01T00:00:00Z`); a bare date is
+  refused. Before, anything `new Date()` accepted was read in the server's zone.
+  Unknown query parameters on that route are refused too. Routes that declare no query
+  schema still ignore a query string.
+- **`extractMeta` is deleted, not allow-listed.** `HttpExceptionFilter` publishes a 4xx
+  exception's message and nothing else of its payload; structured detail reaches the
+  wire only through `ApiError.meta`. Nothing depended on the forwarding once
+  `ZodValidationPipe` was gone. The payload still reaches the log as `cause`.
+- **Validation is typed `VALIDATION`, where it was `BAD_REQUEST`** — a wire change for
+  any client switching on `type`. `BAD_REQUEST` remains for `If-Match` problems and
+  business-rule refusals.
+- **`If-Match` is not routed through `@Validate`.** Headers are outside the three slots;
+  `parseIfMatch` already refuses a missing or malformed one with its own codes.
+- **Unit-level files beyond the plan's list:** `contracts.requests.unit` (the schemas
+  themselves) and the `validation.http` spec is run by `pnpm --filter @athlete/api run
+  test` (it needs no database).
+- **Docs:** README numbers, transcript, tests table and the 500 example (which was this
+  phase's defect 6) were refreshed; `docs/01`–`06` prose is phase 7.
 
 ---
 
@@ -778,18 +833,18 @@ human. Touches no application code.
 
 **Tasks.**
 
-- [ ] modules extracted; dev/prod base+app stacks; shared identity stack
-- [ ] deploy identity scoped; privilege split documented
-- [ ] wildcard-justification rule written down and applied
-- [ ] dotenvx env encryption; keys ignored; local-development doc updated
-- [ ] tflint + fmt CI job
+- [x] modules extracted; dev/prod base+app stacks; shared identity stack
+- [x] deploy identity scoped; privilege split documented
+- [x] wildcard-justification rule written down and applied
+- [x] dotenvx env encryption; keys ignored; local-development doc updated
+- [x] tflint + fmt CI job
 
 **Exit criteria.**
 
 ```bash
 terraform -chdir=infra/terraform/stacks/dev/app fmt -check
 terraform -chdir=infra/terraform/stacks/dev/app validate   # init -backend=false
-tflint --recursive
+tflint --recursive --config "$(pwd)/.tflint.hcl"           # from infra/terraform; see Deviations
 pnpm run typecheck && pnpm run lint && pnpm --filter @athlete/api run test
 ```
 
@@ -797,8 +852,86 @@ pnpm run typecheck && pnpm run lint && pnpm --filter @athlete/api run test
 - No wildcard scope exists without an adjacent justification comment (grep and eyeball).
 - The repo boots from the encrypted env file with `.env.keys` present and fails clearly without it.
 
+**Verified on 2026-11-22**, in Docker (`hashicorp/terraform:1.17.2`,
+`ghcr.io/terraform-linters/tflint:v0.66.0`, azurerm ruleset 0.33.0), run twice by two
+sessions: `fmt -check -recursive` exit 0; `validate` "Success!" for all five stacks with
+`-lockfile=readonly`; `terraform test` against a mocked azurerm provider 10 passed, 0
+failed; tflint with the config exit 0, no findings. `pnpm dev` served `/api/v1/health`
+with the key present and exited 1 with `DECRYPTION_FAILED ... DATABASE_URL,
+SESSION_SECRET` without it. **Not verified, and not verifiable without a subscription:**
+any plan or apply; every permission list; the `backend "azurerm"` and
+`terraform_remote_state` arguments; regional availability in UAE North; that the new CI
+job's two setup actions run on GitHub (only its shell commands were executed).
+
 ### Deviations
-_(none yet)_
+- **`tflint --recursive` as the plan wrote it passes vacuously.** Recursive mode does
+  not load a parent directory's `.tflint.hcl`, so the azurerm ruleset never runs and
+  the exit code is still 0 (shown with a planted invalid SKU). The command is
+  `tflint --recursive --config "$(pwd)/.tflint.hcl"`; the config lives in
+  `infra/terraform/`, where every Terraform command runs.
+- **Prod Postgres is `GP_Standard_D2ds_v4`, not the `B_Standard_B2s` in docs/05.** Azure
+  offers no HA on Burstable SKUs, so "B2s with zone-redundant HA" cannot be created;
+  `modules/postgres` rejects the pair and a test pins it. HA was kept and the SKU moved.
+  **This makes docs/05's sizing row, cost table and 40%-cut answer stale** — an open
+  decision for phase 7 (keep HA and re-cost, or keep B2s and drop HA; a few lines in
+  `stacks/prod/base/locals.tf`).
+- **The dotenvx premise was wrong.** Neither test suite needs any env value, so there
+  was no placeholder awkwardness to remove; the README's claim was stale and CI's
+  placeholder `env:` blocks were deleted. What dotenvx adds is `pnpm dev` on the host,
+  which nothing loaded an env file for before. A reviewer without `.env.keys` cannot
+  use it and is pointed at compose or `.env.example` instead; only `DATABASE_URL` and
+  `SESSION_SECRET` are encrypted, and both are local-only values.
+- Deploy-identity grants are split across two stacks: `shared` holds the identity,
+  federated credential, state and registry grants; `<env>/base/deploy-access.tf` holds
+  the grants on that environment's resources, which do not exist until `base` runs.
+- State is one blob container per stack rather than one key: blob RBAC scopes to the
+  container, so this is "its own state key" without ABAC conditions.
+- "Read `base` outputs" is read access to the whole base state, so base keeps
+  credentials out of it: the three passwords are `ephemeral "random_password"` values
+  passed to write-only arguments (Terraform ≥ 1.11; pinned `~> 1.17.0`). What remains
+  sensitive in state is ingest-only keys and SPA storage keys with shared-key auth off.
+- "Role assignments scoped to the app resource group only" is not literally achievable:
+  the deploy identity also needs `join` on the Container Apps environment and Managed
+  Identity Operator on the two workload identities. Each is assigned on that single
+  resource, never on the base resource group. The app-resource-group grant is a custom
+  role of nine listed actions with no `delete`, not a built-in Contributor.
+- One shared registry in `stacks/shared`: dev gets `AcrPush`, prod `AcrPull` only and
+  deploys the digest dev pushed; `api_image` must be digest-pinned.
+- Beyond the plan's list: the deploy identity may write the SPA account's `$web`
+  container, and may start a migration Container Apps Job that runs under its own
+  identity — with Postgres VNet-only, a hosted runner cannot run migrations.
+- "Network" was a stub; base now builds a VNet, two delegated subnets and a private DNS
+  zone, and Postgres has no public endpoint. Private endpoints for Key Vault, registry
+  and storage, NSGs and an operator path into the VNet remain unwritten.
+- `edge` is Front Door Standard, as the docs argue. Standard has no managed WAF rules
+  and no Private Link origins, so the WAF is one rate-limit rule and both origins are
+  reachable directly. Recorded as known gaps; "Front Door + WAF" in README and docs
+  overclaims until qualified (phase 7).
+- Stacks are `dev` and `prod`; `dev` is a pre-production Azure environment, which
+  docs/05 calls `staging` and describes as a workspace. Also phase 7.
+- Added `terraform test` files with a mocked provider and a CI step for them:
+  plan-time evaluation `validate` does not give, still not a plan against Azure.
+- Per-secret `Key Vault Secrets User` assignments replace the vault-wide one; the
+  operator group gets Key Vault Administrator (the flat config gave the applier no
+  data-plane grant and would have failed on its first secret). `prevent_destroy` on the
+  vault, its secrets and the state containers; `ignore_changes` on the image removed.
+- azurerm stays on 4.x (`~> 4.81`); stack lock files are committed for linux amd64/arm64
+  and darwin arm64, module lock files are ignored.
+- **Review: the migration job is updated by a targeted apply, then started with no
+  flags.** Passing an image to `az containerapp job start` replaces the whole execution
+  template, dropping the migration command; and on a first deploy the job did not exist
+  yet. The sequence is now `apply -target=...migrate`, `job start`, full apply — at the
+  cost of a `-target` warning on every deploy.
+- **Review: `index.html` is not cached at the edge.** One route cached everything with
+  no origin `Cache-Control` and no purge grant, so a release could serve a stale shell
+  for days. `edge` now has an uncached catch-all route and a cached route for
+  fingerprinted assets (`/assets/*` by default, which assumes Vite's default).
+- `backup.tf` moved to `stacks/<env>/base/` with its three STUBs intact: dump job,
+  restore drill and absence alerts are still not written. Neither is the deploy
+  workflow; `ci.yml`'s commented sketch predates this layout.
+- README's Terraform paragraph, "not built" list and tree were corrected now because
+  they had become false; the rest of the stale infrastructure prose (docs/05 lines on
+  sizing, cost, environments, CI/CD flow, edge; docs/06 "currently stubbed") is phase 7.
 
 ---
 

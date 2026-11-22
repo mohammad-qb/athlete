@@ -46,18 +46,12 @@ jobs:
 
       - name: Unit tests
         run: pnpm --filter @athlete/api run test
-        env:
-          DATABASE_URL: postgres://unused:unused@localhost:5432/unused
-          SESSION_SECRET: ci-session-secret-at-least-32-characters
 
       # Integration tests start a real Postgres via Testcontainers. The guarantees being
       # asserted (RLS, exclusion constraints, composite FKs) exist in the database, so
       # testing them against anything else would prove nothing.
       - name: Integration tests (Testcontainers + real Postgres)
         run: pnpm --filter @athlete/api run test:integration
-        env:
-          SESSION_SECRET: ci-session-secret-at-least-32-characters
-          DATABASE_URL: postgres://unused:unused@localhost:5432/unused
 
   # Wiring check. Separate from `verify` because it exercises a different class of
   # defect: the integration suite asserts database guarantees directly and cannot catch
@@ -100,6 +94,67 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  # Static verification of infra/terraform. It never plans against Azure and never
+  # applies: there is no subscription, and this job holds no cloud credential at all.
+  # What it does prove is listed in infra/terraform/README.md under "What has been
+  # verified" -- and so is what it does not.
+  terraform:
+    name: Terraform (fmt, validate, mocked plan, tflint)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.2
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      # Stacks are discovered, not listed, so a new stack cannot be left out. Modules
+      # are validated through the stacks that call them.
+      # -lockfile=readonly: a missing or stale .terraform.lock.hcl fails here instead
+      # of being silently regenerated on the runner.
+      - name: terraform validate (every stack)
+        run: |
+          for stack in $(find stacks -name versions.tf -not -path '*/.terraform/*' -exec dirname {} \; | sort); do
+            echo "::group::validate $stack"
+            terraform -chdir="$stack" init -backend=false -input=false -lockfile=readonly
+            terraform -chdir="$stack" validate
+            echo "::endgroup::"
+          done
+
+      # `terraform test` against a mocked azurerm provider: a full plan-time evaluation
+      # (references, for_each keys, validation rules) with no API call.
+      - name: terraform test (mocked provider, no credentials)
+        run: |
+          for dir in $(find modules stacks -type d -name tests -not -path '*/.terraform/*' -exec dirname {} \; | sort); do
+            echo "::group::test $dir"
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" test
+            echo "::endgroup::"
+          done
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.66.0
+
+      # --config is not optional: in --recursive mode tflint looks for .tflint.hcl in
+      # each directory it descends into, finds none, and falls back to the bundled
+      # rules only -- which passes while the azurerm ruleset never runs.
+      - name: tflint
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # avoids rate limiting on the ruleset download
+        run: |
+          tflint --init
+          tflint --recursive --config "$(pwd)/.tflint.hcl"
 
   # Deployment shape, included to show the sequencing rather than to run here.
   #

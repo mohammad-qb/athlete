@@ -3,6 +3,7 @@ import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { CommonModule } from './common/common.module';
 import { AuthorizationGuard } from './common/authz/authorization.guard';
 import { TenantTransactionInterceptor } from './common/tenancy/tenant-transaction.interceptor';
+import { ValidationInterceptor } from './common/validation/validation.interceptor';
 import { AuthModule } from './modules/auth/auth.module';
 import { AuthenticationGuard } from './modules/auth/authentication.guard';
 import { AthletesModule } from './modules/athletes/athletes.module';
@@ -28,6 +29,9 @@ export const API_GLOBAL_PREFIX = 'api/v1';
     { provide: APP_GUARD, useClass: AuthenticationGuard },
     // Deny by default: a route without @Permission or @Public is refused.
     { provide: APP_GUARD, useClass: AuthorizationGuard },
+    // Interceptors run in registration order. Input is parsed first, so a malformed
+    // request is refused before a transaction is opened for it.
+    { provide: APP_INTERCEPTOR, useClass: ValidationInterceptor },
     // Every authenticated request runs inside a tenant-scoped transaction.
     { provide: APP_INTERCEPTOR, useClass: TenantTransactionInterceptor },
 
