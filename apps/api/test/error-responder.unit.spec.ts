@@ -272,27 +272,24 @@ describe('HttpExceptionFilter', () => {
     });
   });
 
-  it('carries structured detail forward into meta instead of flattening it', () => {
+  /**
+   * An HttpException's payload is whatever object its thrower passed, and nothing marks
+   * it as meant for the client. Only `message` is published; structured detail reaches
+   * the wire through ApiError's `meta` or not at all.
+   */
+  it('publishes the message of a 4xx and none of the rest of its payload', () => {
     const response = normalise(
       new BadRequestException({
-        error: 'validation_failed',
-        issues: [{ path: 'dateOfBirth', message: 'Invalid date' }],
+        message: 'Tenant mismatch',
+        tenantId: '7d0c0f0e-0000-4000-8000-000000000001',
+        resolvedFrom: 'x-internal-routing',
       }),
     );
 
     expect(response.statusCode).toBe(400);
-    expect(response.body?.meta).toEqual({
-      issues: [{ path: 'dateOfBirth', message: 'Invalid date' }],
-    });
-  });
-
-  /**
-   * Nest's own `statusCode`, `message` and `error` keys are dropped: the first two are
-   * already top-level fields of the new shape, and keeping `statusCode` would make it
-   * the sole content of `meta` for every stock Nest exception.
-   */
-  it('does not duplicate Nest own envelope keys into meta', () => {
-    expect(normalise(new NotFoundException('gone')).body?.meta).toBeUndefined();
+    expect(response.body?.message).toBe('Tenant mismatch');
+    expect(response.body?.meta).toBeUndefined();
+    expect(JSON.stringify(response.body)).not.toContain('x-internal-routing');
   });
 
   it('joins an array message rather than degrading to the class name', () => {

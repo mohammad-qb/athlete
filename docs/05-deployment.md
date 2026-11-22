@@ -114,7 +114,7 @@ rather than a runbook:
 | Tenant isolation | Postgres RLS + composite FKs + app-layer scoping |
 | Authorization | Deny-by-default global guard; route coverage asserted in CI |
 | Transport | TLS everywhere; `require_secure_transport = ON` on Postgres |
-| Secrets | Key Vault + managed identity; no secret in CI or repo |
+| Secrets | Key Vault + managed identity; no deployed secret in CI or repo. The one committed env file, `.env.development`, holds local-only values, encrypted with dotenvx; its key is not committed |
 | Credentials | argon2id, refresh rotation, TOTP available (auth library) |
 | Database access | App connects as non-owner `NOBYPASSRLS` role |
 | Edge | Front Door WAF *(stubbed)* |

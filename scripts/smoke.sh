@@ -111,10 +111,31 @@ check "a refusal is typed NOT_FOUND"   NOT_FOUND      "$(field type -H "$B" "$BA
 check "no token is typed UNAUTHORIZED" UNAUTHORIZED   "$(field type "$BASE/athletes")"
 
 echo
-echo "Validation"
+echo "Validation (on by default; a 200 never means \"nothing happened\")"
+etag() { curl -s -D- -o /dev/null -H "$A" "$BASE/athletes/$ATHLETE" | awk 'tolower($1)=="etag:"{print $2}' | tr -d '\r"'; }
+# First field path out of a validation failure's meta.fields.
+field_path() { curl -s "$@" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).meta.fields.map(f=>f.in+":"+f.path).join(",")))}catch{process.stdout.write("<unparseable>")}})'; }
+
 check "malformed body is refused"      400  "$(code -X POST -H "$A" -H "$JSON" -d '{"firstName":"","lastName":"Z","dateOfBirth":"nope"}' "$BASE/athletes")"
 check "malformed id is refused"        400  "$(code -H "$A" "$BASE/athletes/not-a-uuid")"
-check "validation is typed BAD_REQUEST" BAD_REQUEST "$(field type -H "$A" "$BASE/athletes/not-a-uuid")"
+check "validation is typed VALIDATION" VALIDATION "$(field type -H "$A" "$BASE/athletes/not-a-uuid")"
+check "the failing field is named"     "params:id" "$(field_path -H "$A" "$BASE/athletes/not-a-uuid")"
+
+# The silent no-op. A misspelled field used to be stripped, leaving an empty patch that
+# "succeeded": 200, version bumped, every other client's ETag stale, nothing changed.
+# Sent with the CURRENT ETag, so the only thing that can refuse it is validation.
+BEFORE=$(etag)
+check "misspelled field is refused"    400  "$(code -X PATCH -H "$A" -H "If-Match: \"$BEFORE\"" -H "$JSON" -d '{"dateofBirth":"2010-01-01"}' "$BASE/athletes/$ATHLETE")"
+check "...and names the field"         "body:dateofBirth" "$(field_path -X PATCH -H "$A" -H "If-Match: \"$BEFORE\"" -H "$JSON" -d '{"dateofBirth":"2010-01-01"}' "$BASE/athletes/$ATHLETE")"
+check "empty patch is refused"         400  "$(code -X PATCH -H "$A" -H "If-Match: \"$BEFORE\"" -H "$JSON" -d '{}' "$BASE/athletes/$ATHLETE")"
+# Compared together with its shape: two identical non-answers must not count as "unchanged".
+AFTER=$(etag)
+check "the ETag did not move"          "$BEFORE integer" "$AFTER $(etag_shape "$AFTER")"
+
+# An unparseable ?at used to reach the driver as an Invalid Date and come back as a 500.
+check "garbage query value is a 400"   400  "$(code -H "$A" "$BASE/teams/$TEAM_A/roster?at=garbage")"
+check "a valid instant is accepted"    200  "$(code -H "$A" "$BASE/teams/$TEAM_A/roster?at=2026-01-01T00:00:00Z")"
+check "unknown query parameter refused" 400 "$(code -H "$A" "$BASE/teams/$TEAM_A/roster?when=now")"
 
 echo
 if [ $fail -eq 0 ]; then

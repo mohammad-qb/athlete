@@ -11,23 +11,27 @@ API surface or to what a route demands is always a reviewed diff here.
 Who holds each `(action, subject)` pair is decided in one place:
 [`apps/api/src/common/authz/ability.ts`](../../apps/api/src/common/authz/ability.ts).
 
+"Validates" lists the parts of the request the route declares a schema for with
+`@Validate`. A handler can only read a part that is listed: the `@Valid*` parameter
+decorators refuse an undeclared one at runtime, and the same test fails the build first.
+
 Regenerate with:
 
 ```bash
 UPDATE_ROUTE_MANIFEST=1 pnpm --filter @athlete/api run test
 ```
 
-| Method | Path | Handler | Action | Subject |
-|---|---|---|---|---|
-| GET | `/api/v1/athletes` | `AthletesController.list` | read | athletes |
-| POST | `/api/v1/athletes` | `AthletesController.create` | create | athletes |
-| GET | `/api/v1/athletes/:id` | `AthletesController.getById` | read | athletes |
-| PATCH | `/api/v1/athletes/:id` | `AthletesController.update` | update | athletes |
-| GET | `/api/v1/health` | `HealthController.live` | _public_ | _public_ |
-| POST | `/api/v1/sessions` | `SessionsController.create` | create | trainingSessions |
-| GET | `/api/v1/sessions/:id/attendance` | `SessionsController.register` | read | sessionParticipants |
-| POST | `/api/v1/sessions/:id/attendance` | `SessionsController.recordAttendance` | create | sessionParticipants |
-| POST | `/api/v1/teams` | `TeamsController.createTeam` | create | teams |
-| POST | `/api/v1/teams/:id/memberships` | `TeamsController.addMembership` | create | teamMemberships |
-| GET | `/api/v1/teams/:id/roster` | `TeamsController.roster` | read | teamMemberships |
-| POST | `/api/v1/teams/transfers` | `TeamsController.transfer` | update | teamMemberships |
+| Method | Path | Handler | Action | Subject | Validates |
+|---|---|---|---|---|---|
+| GET | `/api/v1/athletes` | `AthletesController.list` | read | athletes | — |
+| POST | `/api/v1/athletes` | `AthletesController.create` | create | athletes | body |
+| GET | `/api/v1/athletes/:id` | `AthletesController.getById` | read | athletes | params |
+| PATCH | `/api/v1/athletes/:id` | `AthletesController.update` | update | athletes | params, body |
+| GET | `/api/v1/health` | `HealthController.live` | _public_ | _public_ | — |
+| POST | `/api/v1/sessions` | `SessionsController.create` | create | trainingSessions | body |
+| GET | `/api/v1/sessions/:id/attendance` | `SessionsController.register` | read | sessionParticipants | params |
+| POST | `/api/v1/sessions/:id/attendance` | `SessionsController.recordAttendance` | create | sessionParticipants | params, body |
+| POST | `/api/v1/teams` | `TeamsController.createTeam` | create | teams | body |
+| POST | `/api/v1/teams/:id/memberships` | `TeamsController.addMembership` | create | teamMemberships | params, body |
+| GET | `/api/v1/teams/:id/roster` | `TeamsController.roster` | read | teamMemberships | params, query |
+| POST | `/api/v1/teams/transfers` | `TeamsController.transfer` | update | teamMemberships | body |

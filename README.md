@@ -305,9 +305,23 @@ pnpm --filter @athlete/api run test              # unit — no Docker needed
 pnpm --filter @athlete/api run test:integration  # real Postgres via Testcontainers
 ```
 
-The unit suite needs placeholder env values (`DATABASE_URL`, `SESSION_SECRET`) because
-configuration is validated at boot and the app refuses to start half-configured. See
-[`.env.example`](./.env.example).
+Neither suite needs any environment: the unit suite never boots the application, and
+the integration suite builds its own connection strings from the containers it starts.
+
+### Run the API on the host
+
+```bash
+pnpm dev        # dotenvx run --strict -f .env.development -- start:dev
+```
+
+[`.env.development`](./.env.development) is committed with its secret values
+encrypted by [dotenvx](https://dotenvx.com); the private key is `.env.keys`, which is
+git-ignored and travels out of band. Without it the command stops with
+`DECRYPTION_FAILED` naming the variables, rather than booting on ciphertext. **A
+reviewer without the key is not blocked**: the compose stack below needs no env file at
+all, and [`.env.example`](./.env.example) lists the same variables in the clear for
+exporting by hand. A variable already set in the shell wins over the file
+(`DATABASE_URL=... pnpm dev`).
 
 ### Run the whole stack — and the single-server answer
 
@@ -333,13 +347,13 @@ Run on macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2, `postgres:17-alpine`:
 ```
 pnpm run typecheck                          ✓ no errors (5 tasks)
 pnpm run lint                               ✓ no errors (6 tasks, type-aware)
-pnpm run lint:boundaries                    ✓ no violations (58 modules, 123 dependencies)
+pnpm run lint:boundaries                    ✓ no violations (59 modules, 127 dependencies)
 pnpm run build                              ✓ 3 tasks
-test (unit)                                 ✓ 150 passed (9 files)
+test (unit + route coverage + HTTP)         ✓ 180 passed (11 files)
 test:integration (real Postgres)            ✓ 67 passed  (7 files)
 docker build -f apps/api/Dockerfile         ✓ image builds
 docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql
-./scripts/smoke.sh (containerised stack)    ✓ 18/18 checks passed
+./scripts/smoke.sh (containerised stack)    ✓ 26/26 checks passed
 ```
 
 The smoke run, verbatim — note check 4, which is the same request as check 3 with a
@@ -349,6 +363,7 @@ different academy's token:
 Liveness and deny-by-default
   PASS  health is public                             200
   PASS  no token is refused                          401
+
 Tenant isolation over HTTP (identical request, different academy)
   PASS  academy A sees its athletes                  200
   PASS  academy B sees an empty list                 []
@@ -357,20 +372,33 @@ Tenant isolation over HTTP (identical request, different academy)
 Resource scoping inside one academy (a coach of team A; team B exists beside it)
   PASS  coach lists only their team's athletes       44444444-4444-4444-4444-444444444444
   PASS  coach is refused team B's roster             403
+
 Optimistic concurrency
   PASS  read returns an ETag                         integer
   PASS  write with current ETag wins                 200
   PASS  stale write is refused                       409
   PASS  write without If-Match refused               400
+
 Error contract (one shape for every failure, not just a status code)
   PASS  conflict is typed CONFLICT                   CONFLICT
   PASS  conflict carries a stable code               stale_write
   PASS  a refusal is typed NOT_FOUND                 NOT_FOUND
   PASS  no token is typed UNAUTHORIZED               UNAUTHORIZED
-Validation
+
+Validation (on by default; a 200 never means "nothing happened")
   PASS  malformed body is refused                    400
   PASS  malformed id is refused                      400
-  PASS  validation is typed BAD_REQUEST              BAD_REQUEST
+  PASS  validation is typed VALIDATION               VALIDATION
+  PASS  the failing field is named                   params:id
+  PASS  misspelled field is refused                  400
+  PASS  ...and names the field                       body:dateofBirth
+  PASS  empty patch is refused                       400
+  PASS  the ETag did not move                        9 integer
+  PASS  garbage query value is a 400                 400
+  PASS  a valid instant is accepted                  200
+  PASS  unknown query parameter refused              400
+
+All smoke checks passed.
 ```
 
 Every failure has the same shape, because a client should be able to write one error
@@ -391,8 +419,9 @@ handler. The 409 body, which also has to tell the caller how to recover:
 `type` is the stable category to switch on, `code` identifies the specific failure,
 `meta` is machine-readable and `explanation` is for a human. What is **not** in any
 body is the `cause` chain: an unexpected failure is redacted to `"Internal server
-error"` and the original survives only in the log. Provoking one deliberately — an
-unparseable `?at` reaching the driver — the client gets:
+error"` and the original survives only in the log. When one was provoked
+deliberately — an unparseable `?at` on the roster route, which used to reach the
+driver — the client got:
 
 ```json
 { "statusCode": 500, "name": "ApiError", "message": "Internal server error", "type": "INTERNAL" }
@@ -402,10 +431,30 @@ while the log line carries the full failing SQL, its bound parameters and the te
 id. That asymmetry is the point of keeping `cause` unserialisable: a filter can attach
 a raw `pg` error without anyone having to judge whether it leaks.
 
-**Terraform has not been applied or validated** — no Azure subscription and no
-Terraform binary were available. It is a reviewed design artifact; expect
-provider-schema corrections on first `plan`. [`infra/terraform/README.md`](./infra/terraform/README.md)
-lists exactly what is stubbed.
+That particular request no longer gets that far, because it was never a server fault.
+Every route declares the schemas its input must satisfy and nothing reaches a handler
+unparsed, so the same `?at=garbage` is now the caller's 400, with the field named:
+
+```json
+{
+  "statusCode": 400,
+  "name": "ApiError",
+  "message": "Request validation failed",
+  "type": "VALIDATION",
+  "code": "validation_failed",
+  "meta": { "fields": [{ "in": "query", "path": "at", "messages": ["Invalid ISO datetime"] }] }
+}
+```
+
+The redaction itself stays asserted by `error-responder.unit`.
+
+**Terraform has been validated but never planned or applied** — there is no Azure
+subscription. Every stack passes `fmt`, `validate` against the locked azurerm schema,
+`terraform test` with a mocked provider, and `tflint` with the azurerm ruleset (CI runs
+the same four). None of that touches Azure: the permission lists are reasoned, not
+exercised, and regional availability is unchecked.
+[`infra/terraform/README.md`](./infra/terraform/README.md) lists what was verified, what
+was not, and what is still a stub.
 
 ---
 
@@ -419,7 +468,7 @@ Each one exists to make a specific claim falsifiable.
 | `temporal.membership.integration` | Overlapping periods in the same team rejected; concurrent membership of *different* teams allowed; back-to-back periods permitted (`[)` bounds); inverted periods rejected; "who was on this team in March" answered from the period | "maintaining historical records" |
 | `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted — by the application role (no privilege) or by the owner (`RESTRICT`); a replayed offline submission inserts nothing | "maintaining historical records when athletes change teams" |
 | `concurrency.optimistic-lock.integration` | Two writers hold version 0; the first wins, the second affects **zero rows** → 409, and the first writer's change survives; no row lock is held across user think-time | "two users update the same record simultaneously" |
-| `authz.route-coverage` | Walks the real module graph and fails if **any** route lacks `@Permission` or `@Public`; every declared `(action, subject)` is in the shared vocabulary and every subject is claimed by a route or explicitly reserved; the public allowlist is asserted explicitly; the committed [route manifest](docs/reference/route-manifest.md), with paths as served under `/api/v1`, must match the code | "secure access based on user roles and responsibilities" |
+| `authz.route-coverage` | Walks the real module graph and fails if **any** route lacks `@Permission` or `@Public`; every declared `(action, subject)` is in the shared vocabulary and every subject is claimed by a route or explicitly reserved; the public allowlist is asserted explicitly; the committed [route manifest](docs/reference/route-manifest.md), with paths as served under `/api/v1`, must match the code. The same walk covers validation: no handler binds `@Body`, `@Param` or `@Query`; every part of the request a handler reads, every body-taking method and every path parameter has a declared schema; and every declared schema refuses an unknown key | "secure access based on user roles and responsibilities" |
 | `authz.ability.unit` | One CASL ability definition is the whole policy: grants per role; the operations each route demanded before are held by exactly the roles those routes listed; the coarse (guard) and scoped (query) modes agree on which operations exist, and scoped never grants what the guard refuses; a coach with no active assignment gets **no rule**, not a rule over an empty list | "secure access based on user roles and responsibilities" |
 | `authz.guard.unit` | The guard refuses an undeclared route even for a platform administrator, answers 401 without a principal, and decides from the ability rather than a role list on the route | "secure access based on user roles and responsibilities" |
 | `authz.to-sql-where.unit` | A rule condition compiles to the SQL it says (asserted on rendered text and bound parameters), agrees with the in-memory matcher on `NULL` — including ordering, where CASL coerces null to 0, cross-checked against the real matcher — and **throws** on an unknown operator, an unmapped field, a relation or a boolean ordering operand — a restriction is never silently dropped | — |
@@ -428,9 +477,11 @@ Each one exists to make a specific claim falsifiable.
 | `privileges.matrix.integration` | As the application role, inside its own tenant: `DELETE` on a recorded fact is refused; so is `UPDATE` of anything but the voiding columns; a session with a register cannot be deleted **even by the owner** (`RESTRICT`, where it used to cascade); a role grant, a user or an academy cannot be created, and `users` cannot be read; a table added later is unreachable without an explicit grant; correction works as void + re-insert; a voided membership grants no access; a closed period cannot be reopened and a void cannot be undone or re-attributed, while the owner can still repair a row; the boot assertion accepts `athlete_app`, refuses the owner, and refuses a non-owner role holding one grant more than the matrix — table-level or on single columns, of any privilege kind (`INSERT (…)` on role grants, `REFERENCES`, `TRIGGER`, `MAINTAIN` included) | "prevent unauthorized access"; "maintaining historical records" |
 | `database-privileges.unit` | The boot-time refusal: each of superuser, `BYPASSRLS`, table ownership, a role reachable only by `SET ROLE`, and any privilege outside the matrix (table-level or column-level, of any kind, on any of its tables) is reported, all at once, and an unmigrated database is a refusal rather than a clean bill | — |
 | `authz.principal-scope.integration` | A coach's scope follows the periods in the data at one instant: a closed assignment contributes no team, an athlete who left drops out, the period is half-open, the instant is the database transaction's `now()` rather than the host clock, and the same user's assignment in another academy is unreachable | "secure access based on user roles and responsibilities" |
+| `validation.http` | Over real HTTP against a running Nest application: the handler receives the schema's **parsed output** (a coerced number, a default), not the raw request; an invalid or unknown field is a 400 typed `VALIDATION` naming it by dot path, with params, query and body reported together; and **a route that reads input without declaring a schema is refused** (500, reason in the log only) rather than handed the raw body | — |
+| `contracts.requests.unit` | A request schema never turns a mistake into a successful no-op: a PATCH with a misspelled field, or with no field, is refused where it used to validate to `{}` and bump the version; every request schema, nested entries included, refuses unknown keys; `?at` must be an ISO-8601 instant with an offset | "two users update the same record simultaneously" |
 | `optimistic-concurrency.unit` | `If-Match`/`ETag` parsing, including malformed and weak validators; a stale write is a 409 carrying the version the caller held | "two users update the same record simultaneously" |
 | `api-error.unit` | Every error type maps to the status and log severity the contract promises, the type list is exhaustive (adding one without a status fails here), and `toJSON` cannot serialise `cause` | — |
-| `error-responder.unit` | One log line per failure at its own severity; `meta` logged for 5xx and withheld for 4xx; an unexpected error is redacted to `"Internal server error"` while the **whole cause chain** reaches the log, bounded and cycle-guarded; a 5xx `HttpException` is redacted the same way, payload and all, so choosing a status is not a claim the message is publishable; an `http-errors` 4xx keeps its status only when it marked itself exposable; a response already begun is closed rather than crashed | — |
+| `error-responder.unit` | One log line per failure at its own severity; `meta` logged for 5xx and withheld for 4xx; an unexpected error is redacted to `"Internal server error"` while the **whole cause chain** reaches the log, bounded and cycle-guarded; a 5xx `HttpException` is redacted the same way, payload and all, so choosing a status is not a claim the message is publishable; a 4xx `HttpException` publishes its message and **nothing else** of its payload; an `http-errors` 4xx keeps its status only when it marked itself exposable; a response already begun is closed rather than crashed | — |
 
 ### Three findings from actually running this
 
@@ -495,8 +546,11 @@ Scope choices, each one a decision rather than an omission:
 - **OpenAPI generation and the generated client.** Specified in
   [`docs/01-technology-stack.md`](./docs/01-technology-stack.md); the Zod contracts it
   generates from are already the single source of truth in `packages/contracts`.
-- **Front Door, private networking, backup cron, restore drill.** Marked `STUB` in the
-  Terraform file each belongs in.
+- **Backup cron, restore drill and backup-absence alerts.** Marked `STUB` in
+  `infra/terraform/stacks/<env>/base/backup.tf`. Front Door and private networking for
+  Postgres are written but unapplied, with their gaps (a rate-limit-only WAF, origins
+  reachable directly, no private endpoints for Key Vault, registry or storage) listed in
+  [`infra/terraform/README.md`](./infra/terraform/README.md).
 
 ## Assumptions made where the brief was silent
 
@@ -524,6 +578,8 @@ packages/
 tooling/
   eslint-config/        the type-aware lint gate, and why it is one
 infra/terraform/        Azure UAE North / UAE Central
+  modules/              container-app, postgres, static-site, edge
+  stacks/               shared (CI identity, state) · <env>/base (human-applied) · <env>/app (CI-applied)
 docs/                   the written proposal (A–E of the brief)
 scripts/                smoke check, demo seed, dev token minting
 apps/api/Dockerfile     multi-stage, non-root, prod deps only

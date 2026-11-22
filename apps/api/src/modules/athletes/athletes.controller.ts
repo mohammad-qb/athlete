@@ -1,24 +1,15 @@
-import {
-  Body,
-  Controller,
-  Get,
-  Headers,
-  Param,
-  Patch,
-  Post,
-  Res,
-} from '@nestjs/common';
+import { Controller, Get, Headers, Patch, Post, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import {
   CreateAthleteRequest,
+  IdParams,
   UpdateAthleteRequest,
   type AthleteResponse,
-  Uuid,
 } from '@athlete/contracts';
 import { AthletesService } from './athletes.service';
 import { Permission } from '../../common/authz/permission.decorator';
-import { ZodValidationPipe } from '../../common/http/zod-validation.pipe';
 import { formatETag, parseIfMatch } from '../../common/http/optimistic-concurrency';
+import { Validate, ValidBody, ValidParams } from '../../common/validation/validate.decorator';
 
 /** Thin by design: HTTP concerns and validation only, no business rules. */
 @Controller('athletes')
@@ -33,8 +24,9 @@ export class AthletesController {
 
   @Get(':id')
   @Permission({ action: 'read', subject: 'athletes' })
+  @Validate({ params: IdParams })
   async getById(
-    @Param('id', new ZodValidationPipe(Uuid)) id: string,
+    @ValidParams('id') id: string,
     @Res({ passthrough: true }) response: Response,
   ): Promise<AthleteResponse> {
     const athlete = await this.athletes.getById(id);
@@ -44,8 +36,9 @@ export class AthletesController {
 
   @Post()
   @Permission({ action: 'create', subject: 'athletes' })
+  @Validate({ body: CreateAthleteRequest })
   async create(
-    @Body(new ZodValidationPipe(CreateAthleteRequest)) body: CreateAthleteRequest,
+    @ValidBody() body: CreateAthleteRequest,
     @Res({ passthrough: true }) response: Response,
   ): Promise<AthleteResponse> {
     const athlete = await this.athletes.create(body);
@@ -55,10 +48,11 @@ export class AthletesController {
 
   @Patch(':id')
   @Permission({ action: 'update', subject: 'athletes' })
+  @Validate({ params: IdParams, body: UpdateAthleteRequest })
   async update(
-    @Param('id', new ZodValidationPipe(Uuid)) id: string,
+    @ValidParams('id') id: string,
     @Headers('if-match') ifMatch: string | undefined,
-    @Body(new ZodValidationPipe(UpdateAthleteRequest)) body: UpdateAthleteRequest,
+    @ValidBody() body: UpdateAthleteRequest,
     @Res({ passthrough: true }) response: Response,
   ): Promise<AthleteResponse> {
     const athlete = await this.athletes.update(id, parseIfMatch(ifMatch), body);
