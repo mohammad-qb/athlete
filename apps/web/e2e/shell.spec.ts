@@ -1,20 +1,13 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
-import { BOTH, PASSWORD, STATE } from './support';
+import { BOTH, expectNoHorizontalScroll, PASSWORD, SEED, STATE } from './support';
 
 const SHOTS = path.join(import.meta.dirname, 'screenshots');
 const VIEWPORTS = [
   { name: '1280', width: 1280, height: 800 },
   { name: '390', width: 390, height: 844 },
 ] as const;
-
-async function expectNoHorizontalScroll(page: import('@playwright/test').Page) {
-  const overflow = await page.evaluate(
-    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-  );
-  expect(overflow, 'horizontal page overflow in px').toBeLessThanOrEqual(0);
-}
 
 test.beforeAll(() => mkdirSync(SHOTS, { recursive: true }));
 
@@ -39,6 +32,34 @@ for (const viewport of VIEWPORTS) {
         await page.evaluate(() => document.fonts.ready);
         await expectNoHorizontalScroll(page);
         await page.screenshot({ path: path.join(SHOTS, `athletes-${viewport.name}.png`) });
+      });
+
+      test('an athlete, the teams list and a team fit the screen', async ({ page }) => {
+        await page.goto(`/athletes/${SEED.athleteOnTeamA}`);
+        await expect(page.getByRole('button', { name: 'Save changes' })).toBeVisible();
+        await page.evaluate(() => document.fonts.ready);
+        await expectNoHorizontalScroll(page);
+        await page.screenshot({ path: path.join(SHOTS, `athlete-${viewport.name}.png`) });
+
+        await page.goto('/teams');
+        await expect(page.getByRole('link', { name: 'Team A', exact: true })).toBeVisible();
+        await expectNoHorizontalScroll(page);
+        await page.screenshot({ path: path.join(SHOTS, `teams-${viewport.name}.png`) });
+
+        await page.goto(`/teams/${SEED.teamA}`);
+        await expect(page.getByRole('list', { name: 'Roster' })).toBeVisible();
+        await expectNoHorizontalScroll(page);
+        await page.screenshot({ path: path.join(SHOTS, `team-${viewport.name}.png`) });
+
+        // The dialogs are part of the screen: they must fit it too.
+        await page.getByRole('button', { name: 'Add athlete' }).click();
+        await expect(page.getByRole('dialog')).toBeVisible();
+        await expect(page.getByRole('option').first()).toBeVisible();
+        await expectNoHorizontalScroll(page);
+        await page.screenshot({
+          path: path.join(SHOTS, `team-add-athlete-${viewport.name}.png`),
+          animations: 'disabled',
+        });
       });
     });
   });

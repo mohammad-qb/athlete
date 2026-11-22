@@ -9,6 +9,7 @@ export { ApiError, client, isApiError, toApiError } from './client';
 export {
   configureErrorMapper,
   handleApiError,
+  loadFailureMessage,
   type ErrorHandlers,
   type ErrorOutcome,
   type FieldErrors,

@@ -83,3 +83,17 @@ export function handleApiError(error: unknown, handlers: ErrorHandlers = {}): Er
   else toast.error(apiError.message);
   return 'toast';
 }
+
+/**
+ * Why a record could not be LOADED, for the place on the page where it would have been.
+ * A failed query is not toasted (`lib/query-client.ts`); the page says this instead.
+ * A malformed id in the address bar (400) is, to the person, the same as a record that
+ * is not there.
+ */
+export function loadFailureMessage(error: unknown): string {
+  const apiError = toApiError(error);
+  if (apiError.status === 403) return MESSAGES.forbidden;
+  if (apiError.status === 404 || apiError.status === 400) return MESSAGES.notFound;
+  if (apiError.status >= 500) return MESSAGES.server;
+  return apiError.message;
+}

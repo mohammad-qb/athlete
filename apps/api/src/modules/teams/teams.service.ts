@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import type {
   CreateMembershipRequest,
   CreateTeamRequest,
@@ -12,6 +12,8 @@ import type {
 } from '@athlete/contracts';
 import { TeamsRepository, type MembershipRow, type TeamRow } from './teams.repository';
 import { assertCan } from '../../common/authz/assert-can';
+import { isInvertedRange, violatedConstraint } from '../../common/db/constraint-violation';
+import { ApiError, ApiErrorType } from '../../common/errors/api.error';
 
 @Injectable()
 export class TeamsService {
@@ -44,12 +46,14 @@ export class TeamsService {
     input: CreateMembershipRequest,
   ): Promise<MembershipResponse> {
     await this.requireTeam(teamId);
-    const row = await this.repository.addMembership({
-      teamId,
-      athleteId: input.athleteId,
-      validFrom: new Date(input.validFrom),
-      validTo: input.validTo ? new Date(input.validTo) : null,
-    });
+    const row = await asMembershipRefusal(() =>
+      this.repository.addMembership({
+        teamId,
+        athleteId: input.athleteId,
+        validFrom: new Date(input.validFrom),
+        validTo: input.validTo ? new Date(input.validTo) : null,
+      }),
+    );
     return toMembershipResponse(row);
   }
 
@@ -64,30 +68,35 @@ export class TeamsService {
    */
   async transfer(input: TransferAthleteRequest): Promise<TransferResponse> {
     if (input.fromTeamId === input.toTeamId) {
-      throw new BadRequestException('Source and destination teams are the same');
+      throw new ApiError('Source and destination teams are the same', {
+        type: ApiErrorType.BAD_REQUEST,
+        code: 'transfer_same_team',
+      });
     }
     await this.requireTeam(input.fromTeamId);
     await this.requireTeam(input.toTeamId);
 
     const effectiveAt = new Date(input.effectiveAt);
 
-    const closed = await this.repository.closeOpenMembership(
-      input.fromTeamId,
-      input.athleteId,
-      effectiveAt,
+    const closed = await asMembershipRefusal(() =>
+      this.repository.closeOpenMembership(input.fromTeamId, input.athleteId, effectiveAt),
     );
     if (!closed) {
-      throw new BadRequestException(
-        `Athlete ${input.athleteId} has no open membership in team ${input.fromTeamId}`,
-      );
+      throw new ApiError('The athlete has no open membership in the team they are leaving', {
+        type: ApiErrorType.BAD_REQUEST,
+        code: 'no_open_membership',
+        meta: { athleteId: input.athleteId, teamId: input.fromTeamId },
+      });
     }
 
-    const opened = await this.repository.addMembership({
-      teamId: input.toTeamId,
-      athleteId: input.athleteId,
-      validFrom: effectiveAt,
-      validTo: null,
-    });
+    const opened = await asMembershipRefusal(() =>
+      this.repository.addMembership({
+        teamId: input.toTeamId,
+        athleteId: input.athleteId,
+        validFrom: effectiveAt,
+        validTo: null,
+      }),
+    );
 
     return { closed: toMembershipResponse(closed), opened: toMembershipResponse(opened) };
   }
@@ -115,6 +124,52 @@ export class TeamsService {
     );
     if (!team) throw new NotFoundException(`Team ${teamId} not found`);
     return team;
+  }
+}
+
+/**
+ * The temporal rules of membership are the DATABASE's (`0000_init.sql`), so a write
+ * that breaks one fails inside the driver. Left alone that is a redacted 500, which
+ * tells the person adding an athlete nothing. Each constraint a membership write can
+ * violate is named here with what it means to the caller; anything else is rethrown.
+ *
+ * The statement has already failed, so the request's transaction is rolled back: a
+ * transfer refused at its second step leaves the first one undone.
+ */
+const periodInvalid = () =>
+  new ApiError('A membership must end after it starts', {
+    type: ApiErrorType.BAD_REQUEST,
+    code: 'membership_period_invalid',
+    explanation:
+      'For a transfer, the effective date must be later than the date the athlete joined ' +
+      'the team they are leaving.',
+  });
+
+const MEMBERSHIP_REFUSALS: Record<string, () => ApiError> = {
+  team_memberships_no_overlap_same_team: () =>
+    new ApiError('The athlete is already on this team during that period', {
+      type: ApiErrorType.CONFLICT,
+      code: 'membership_overlap',
+      explanation:
+        'An athlete cannot hold two memberships of one team whose periods overlap. ' +
+        'Choose dates outside the existing membership.',
+    }),
+  // An end EQUAL to the start reaches this CHECK; an end BEFORE it fails earlier, when
+  // the generated `period` range is built, and is recognised by `isInvertedRange`.
+  team_memberships_period_valid: periodInvalid,
+  team_memberships_athlete_fk: () =>
+    new ApiError('Athlete not found', { type: ApiErrorType.NOT_FOUND, code: 'athlete_not_found' }),
+};
+
+async function asMembershipRefusal<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    if (isInvertedRange(error)) throw periodInvalid();
+    const constraint = violatedConstraint(error);
+    const refusal = constraint === undefined ? undefined : MEMBERSHIP_REFUSALS[constraint];
+    if (!refusal) throw error;
+    throw refusal();
   }
 }
 

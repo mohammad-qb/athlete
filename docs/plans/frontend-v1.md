@@ -22,12 +22,11 @@ default scrypt stays), no second deployable beyond static files.
 | 1 | Cookie authentication (better-auth, `athlete_auth` role, `/me`) | done |
 | 2 | API contract (response schemas, lists, new reads, OpenAPI, generated client) | done |
 | 3 | Web foundation (shell, design system, sign-in, athletes list, e2e harness) | done |
-| 4 | Admin screens (athlete create/edit + conflict dialog, teams) | not started |
+| 4 | Admin screens (athlete create/edit + conflict dialog, teams) | done |
 | 5 | Coach flow (sessions, phone attendance) + docs | not started |
 
-**Current phase:** 3 done (2026-11-22, branch `feat/frontend-v1-phase-3`). **Stopped here
-for the owner to look at the running UI**, as this plan asks.
-**Recommended next phase:** 4, once the owner has reviewed phase 3.
+**Current phase:** 4 done (2026-11-23, branch `feat/frontend-v1-phase-4`).
+**Recommended next phase:** 5 (coach flow: sessions, phone attendance, docs).
 
 Phases are strictly sequential. Stop after phase 3 for the owner to look at the running UI
 before building more screens on it.
@@ -806,11 +805,11 @@ resolving an edit conflict.
 
 ### Tasks
 
-- [ ] Athlete create, detail and edit with `If-Match`
-- [ ] Conflict dialog and its error-mapper wiring
-- [ ] Teams list, create, roster, add membership, transfer
-- [ ] Shared pickers; navigation
-- [ ] Unit tests and the Playwright conflict spec
+- [x] Athlete create, detail and edit with `If-Match`
+- [x] Conflict dialog and its error-mapper wiring
+- [x] Teams list, create, roster, add membership, transfer
+- [x] Shared pickers; navigation
+- [x] Unit tests and the Playwright conflict spec
 
 ### Tests
 
@@ -828,7 +827,63 @@ The phase 3 command block passes, including the new Playwright specs. Every scre
 
 ### Deviations
 
-_None yet._
+- **The API changed, which this phase did not plan.** The plan says the temporal rules
+  "surface as typed errors". They did not: an overlapping membership, a period ending
+  before it starts, a transfer dated before the athlete joined and an unknown athlete id
+  all failed in the driver and came back as a redacted 500. `TeamsService` now answers
+  them as 409 `membership_overlap`, 400 `membership_period_invalid` and 404
+  `athlete_not_found` (`common/db/constraint-violation.ts` reads the driver's error), and
+  the two existing transfer refusals gained codes (`transfer_same_team`,
+  `no_open_membership`) and a message without raw ids. No route, schema or status set
+  changed, so `openapi.json` and the generated client are untouched. Proven by
+  `constraint-violation.unit.spec.ts` and seven new `smoke.sh` checks (97 in all).
+- **A period that ends before it starts never reaches its CHECK constraint.** The
+  generated `period` range column is computed first and raises SQLSTATE 22000; only an
+  end equal to the start gets as far as `team_memberships_period_valid`. Both are mapped.
+- **"Keep mine" saves the whole form over the newer version**, not only the fields the
+  person typed in: what is stored afterwards is what the form shows, and the dialog shows
+  each such field as "Theirs / Yours" first. An ordinary save, by contrast, sends only
+  the fields that differ from the version it is made against.
+- **The form saves against the version it was filled from**, held in component state, not
+  against the query cache: a background refetch must not be able to move the version
+  under a half-edited form and so skip the 409. A form nobody has typed in follows a
+  refetch.
+- **`useConflict` fetches the current record; the dialog is presentational.** The plan
+  has the dialog fetch. The edit form passes its labels, a fetch function and the two
+  handlers; the dialog opens only once the other person's version has arrived.
+- **Forms validate the request they are about to send** (`components/form/request-validator.ts`),
+  with the contract schema, after the form's values have been turned into the request
+  (`''` to `null`, a day to an instant). Zod's own wording for an empty or over-long field
+  is replaced with "Required." and a length sentence.
+- **Dates are entered as days.** A membership runs from the start of its first day to the
+  end of its last, a transfer takes effect at the start of its day, and "roster as of" a
+  day asks for the end of that day, all in the browser's zone (`lib/dates.ts`). The API
+  still receives full instants. Its periods exclude their end, so a membership's last
+  day is sent as the start of the day after it; that keeps the athlete on the roster as
+  of their last day and lets a membership starting the next day follow without a gap.
+- **The roster's day is a search param (`?on=YYYY-MM-DD`)** on the team route. Adding and
+  transferring are offered on today's roster only; a past day is read-only.
+- **The pickers are inline** (a search box with the matches under it), not a popover
+  combobox: no `popover` or `command` primitive was added, and they fit a dialog at
+  390px. The only new primitive is `dialog`.
+- **A coach may update athletes** (`common/authz/ability.ts`), so the coach test asserts
+  the edit form is theirs to use and that Add athlete, New team, Add to roster and
+  Transfer are absent.
+- **Athlete create is a dialog**; the plan allowed either.
+- **End-to-end beyond the specs the plan lists.** `admin-screens.spec.ts` (add and edit an
+  athlete, an address that names no athlete, build a team, add, be refused an overlap,
+  transfer, read the earlier roster) and the new screens and two dialogs at both widths
+  in `shell.spec.ts`. The setup signs the coach in as well. Specs create uniquely named
+  records, so the suite re-runs on one database.
+- **`smoke.sh` builds its new JSON bodies in variables.** Inside `"$(...)"` the bash macOS
+  ships brace-expands a quoted `{a,b}`, which turned one request into four.
+- **Files the plan did not name:** `components/record-state.tsx`, `components/pickers/*`,
+  `components/form/request-validator.ts`, `lib/dates.ts`, `loadFailureMessage` in
+  `lib/api/errors.ts`, `features/athletes/athlete-values.ts`,
+  `features/teams/team-requests.ts`.
+- **Docs corrected in this phase:** `README.md` (what is built, layout, verified state and
+  the recorded smoke run), `apps/web/README.md`, `docs/01` §6, `docs/03` (the membership
+  refusals), `docs/06` (next steps).
 
 ---
 

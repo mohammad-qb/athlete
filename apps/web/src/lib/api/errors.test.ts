@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, toApiError } from './client';
-import { configureErrorMapper, handleApiError } from './errors';
+import { configureErrorMapper, handleApiError, loadFailureMessage } from './errors';
 
 const toastError = vi.hoisted(() => vi.fn());
 vi.mock('sonner', () => ({ toast: { error: toastError } }));
@@ -149,5 +149,19 @@ describe('toApiError', () => {
   it('returns an ApiError unchanged', () => {
     const error = apiError({ status: 404 });
     expect(toApiError(error)).toBe(error);
+  });
+});
+
+describe('loadFailureMessage', () => {
+  it('says what a failed read means to the person, not what the server said', () => {
+    expect(loadFailureMessage(apiError({ status: 403 }))).toMatch(/permission/);
+    expect(loadFailureMessage(apiError({ status: 404 }))).toMatch(/no longer exists/);
+    // A malformed id in the address bar is, to the person, a record that is not there.
+    expect(loadFailureMessage(apiError({ status: 400 }))).toMatch(/no longer exists/);
+    expect(loadFailureMessage(apiError({ status: 503 }))).toMatch(/our side/);
+  });
+
+  it('keeps the message that already explains itself (no response at all)', () => {
+    expect(loadFailureMessage(new TypeError('Failed to fetch'))).toMatch(/Could not reach the server/);
   });
 });

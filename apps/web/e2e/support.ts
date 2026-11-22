@@ -4,11 +4,19 @@ import { type APIRequestContext, expect, type Page } from '@playwright/test';
 /** The accounts `scripts/seed-dev.sh` creates. */
 export const PASSWORD = process.env.SEED_PASSWORD ?? 'athlete-dev-password';
 export const ADMIN = { email: 'admin@alpha.test', name: 'Alpha Admin' };
+export const COACH = { email: 'coach@alpha.test', name: 'Alpha Coach' };
 export const BOTH = { email: 'both@alpha.test', name: 'Both Academies' };
+
+/** Rows of `scripts/seed-demo.sql`: the coach's team, and the athlete on it. */
+export const SEED = {
+  teamA: '66666666-6666-6666-6666-666666666666',
+  athleteOnTeamA: '44444444-4444-4444-4444-444444444444',
+};
 
 /** Signed-in browser state, saved by `global.setup.ts` for specs that are not about signing in. */
 export const STATE = {
   admin: path.join(import.meta.dirname, '.auth/admin.json'),
+  coach: path.join(import.meta.dirname, '.auth/coach.json'),
   both: path.join(import.meta.dirname, '.auth/both.json'),
 };
 
@@ -66,4 +74,31 @@ export function recordThirdPartyRequests(page: Page, baseURL: string): string[] 
     if (new URL(url).origin !== origin) foreign.push(url);
   });
   return foreign;
+}
+
+/** The page is no wider than the screen: nothing scrolls sideways. */
+export async function expectNoHorizontalScroll(page: Page) {
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow, 'horizontal page overflow in px').toBeLessThanOrEqual(0);
+}
+
+/** A name no earlier run has used, so a spec can be run again on the same database. */
+export function unique(prefix: string): string {
+  return `${prefix} ${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
+}
+
+/** Creates an athlete over HTTP, as whoever `request` is signed in as. */
+export async function createAthlete(
+  request: APIRequestContext,
+  baseURL: string,
+  athlete: { firstName: string; lastName: string; dateOfBirth?: string },
+): Promise<{ id: string }> {
+  const response = await request.post('/api/v1/athletes', {
+    headers: { Origin: baseURL },
+    data: { dateOfBirth: '2009-05-20', ...athlete },
+  });
+  expect(response.status(), 'create athlete').toBe(201);
+  return (await response.json()) as { id: string };
 }

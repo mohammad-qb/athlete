@@ -118,6 +118,13 @@ stricter and would be wrong for real academies; any such rule is academy policy 
 belongs in the service layer. This is raised as an open requirements question rather
 than assumed.
 
+The database refuses the write; the API says why. `TeamsService` names the constraints a
+membership write can violate and answers each as a typed refusal: an overlapping period
+is a 409 `membership_overlap`, a period that ends before it starts (which a transfer
+dated before the athlete joined would produce) a 400 `membership_period_invalid`. Left
+alone both would be a redacted 500. `scripts/smoke.sh` asserts the codes and that a
+refused transfer leaves the roster as it was.
+
 `'[)'` bounds — inclusive start, exclusive end — so a leaver and a rejoiner on the same
 timestamp is a legal, gapless history.
 

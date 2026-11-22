@@ -14,6 +14,9 @@ import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppAccountRouteImport } from './routes/_app/account'
 import { Route as AppAthletesIndexRouteImport } from './routes/_app/athletes.index'
+import { Route as AppAthletesAthleteIdRouteImport } from './routes/_app/athletes.$athleteId'
+import { Route as AppTeamsIndexRouteImport } from './routes/_app/teams.index'
+import { Route as AppTeamsTeamIdRouteImport } from './routes/_app/teams.$teamId'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -39,18 +42,39 @@ const AppAthletesIndexRoute = AppAthletesIndexRouteImport.update({
   path: '/athletes/',
   getParentRoute: () => AppRoute,
 } as any)
+const AppAthletesAthleteIdRoute = AppAthletesAthleteIdRouteImport.update({
+  id: '/athletes/$athleteId',
+  path: '/athletes/$athleteId',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppTeamsIndexRoute = AppTeamsIndexRouteImport.update({
+  id: '/teams/',
+  path: '/teams/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppTeamsTeamIdRoute = AppTeamsTeamIdRouteImport.update({
+  id: '/teams/$teamId',
+  path: '/teams/$teamId',
+  getParentRoute: () => AppRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/sign-in': typeof SignInRoute
   '/account': typeof AppAccountRoute
+  '/athletes/$athleteId': typeof AppAthletesAthleteIdRoute
+  '/teams/$teamId': typeof AppTeamsTeamIdRoute
   '/athletes/': typeof AppAthletesIndexRoute
+  '/teams/': typeof AppTeamsIndexRoute
 }
 export interface FileRoutesByTo {
   '/sign-in': typeof SignInRoute
   '/account': typeof AppAccountRoute
   '/': typeof AppIndexRoute
+  '/athletes/$athleteId': typeof AppAthletesAthleteIdRoute
+  '/teams/$teamId': typeof AppTeamsTeamIdRoute
   '/athletes': typeof AppAthletesIndexRoute
+  '/teams': typeof AppTeamsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -58,20 +82,40 @@ export interface FileRoutesById {
   '/sign-in': typeof SignInRoute
   '/_app/account': typeof AppAccountRoute
   '/_app/': typeof AppIndexRoute
+  '/_app/athletes/$athleteId': typeof AppAthletesAthleteIdRoute
+  '/_app/teams/$teamId': typeof AppTeamsTeamIdRoute
   '/_app/athletes/': typeof AppAthletesIndexRoute
+  '/_app/teams/': typeof AppTeamsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/sign-in' | '/account' | '/athletes/'
+  fullPaths:
+    | '/'
+    | '/sign-in'
+    | '/account'
+    | '/athletes/$athleteId'
+    | '/teams/$teamId'
+    | '/athletes/'
+    | '/teams/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/sign-in' | '/account' | '/' | '/athletes'
+  to:
+    | '/sign-in'
+    | '/account'
+    | '/'
+    | '/athletes/$athleteId'
+    | '/teams/$teamId'
+    | '/athletes'
+    | '/teams'
   id:
     | '__root__'
     | '/_app'
     | '/sign-in'
     | '/_app/account'
     | '/_app/'
+    | '/_app/athletes/$athleteId'
+    | '/_app/teams/$teamId'
     | '/_app/athletes/'
+    | '/_app/teams/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -116,19 +160,46 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppAthletesIndexRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/athletes/$athleteId': {
+      id: '/_app/athletes/$athleteId'
+      path: '/athletes/$athleteId'
+      fullPath: '/athletes/$athleteId'
+      preLoaderRoute: typeof AppAthletesAthleteIdRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/teams/': {
+      id: '/_app/teams/'
+      path: '/teams'
+      fullPath: '/teams/'
+      preLoaderRoute: typeof AppTeamsIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/teams/$teamId': {
+      id: '/_app/teams/$teamId'
+      path: '/teams/$teamId'
+      fullPath: '/teams/$teamId'
+      preLoaderRoute: typeof AppTeamsTeamIdRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
 interface AppRouteChildren {
   AppAccountRoute: typeof AppAccountRoute
   AppIndexRoute: typeof AppIndexRoute
+  AppAthletesAthleteIdRoute: typeof AppAthletesAthleteIdRoute
+  AppTeamsTeamIdRoute: typeof AppTeamsTeamIdRoute
   AppAthletesIndexRoute: typeof AppAthletesIndexRoute
+  AppTeamsIndexRoute: typeof AppTeamsIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppAccountRoute: AppAccountRoute,
   AppIndexRoute: AppIndexRoute,
+  AppAthletesAthleteIdRoute: AppAthletesAthleteIdRoute,
+  AppTeamsTeamIdRoute: AppTeamsTeamIdRoute,
   AppAthletesIndexRoute: AppAthletesIndexRoute,
+  AppTeamsIndexRoute: AppTeamsIndexRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)

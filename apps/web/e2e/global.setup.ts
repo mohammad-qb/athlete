@@ -1,5 +1,5 @@
 import { expect, request as playwrightRequest, test as setup } from '@playwright/test';
-import { ADMIN, BOTH, PAGER_COUNT, PAGER_LAST_NAME, signInByApi, STATE } from './support';
+import { ADMIN, BOTH, COACH, PAGER_COUNT, PAGER_LAST_NAME, signInByApi, STATE } from './support';
 
 /**
  * Runs once before the specs: saves a signed-in browser state for each seeded account
@@ -31,6 +31,11 @@ setup('sign in the seeded accounts and seed a second page of athletes', async ({
     expect(created.status(), `create athlete ${index}`).toBe(201);
   }
   await admin.dispose();
+
+  const coach = await playwrightRequest.newContext({ baseURL: origin });
+  await signInByApi(coach, origin, COACH.email);
+  await coach.storageState({ path: STATE.coach });
+  await coach.dispose();
 
   const both = await playwrightRequest.newContext({ baseURL: origin });
   await signInByApi(both, origin, BOTH.email);

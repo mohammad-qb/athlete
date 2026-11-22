@@ -164,6 +164,26 @@ check "conflict is typed CONFLICT"     CONFLICT       "$(field type -X PATCH -b 
 check "conflict carries a stable code" stale_write    "$(field code -X PATCH -b "$A" -H "If-Match: \"$ETAG\"" -H "$JSON" -d '{"lastName":"Falcon-Omar"}' "$BASE/athletes/$ATHLETE")"
 check "a refusal is typed NOT_FOUND"   NOT_FOUND      "$(field type -b "$B" "$BASE/athletes/$ATHLETE")"
 check "no cookie is typed UNAUTHORIZED" UNAUTHORIZED  "$(field type "$BASE/athletes")"
+# The temporal rules are the database's. A write that breaks one used to surface as a
+# redacted 500; each is now a refusal that says which rule. Every one of these fails,
+# so the request's transaction rolls back and the seed is left as it was.
+# Bodies are built in variables: inside "$(...)" a quoted {a,b} is still brace-expanded
+# by the bash that macOS ships, which turns one request into several.
+member() { printf '{"athleteId":"%s","validFrom":"%s","validTo":%s}' "$1" "$2" "$3"; }
+move() { printf '{"athleteId":"%s","fromTeamId":"%s","toTeamId":"%s","effectiveAt":"%s"}' "$ATHLETE" "$1" "$2" "$3"; }
+refusal() { field code -b "$A" -H "$JSON" -d "$1" "$BASE/teams/$2"; } # refusal <body> <path>
+OVERLAP=$(member "$ATHLETE" 2026-06-01T00:00:00Z null)
+BACKWARDS=$(member "$ATHLETE" 2025-06-01T00:00:00Z '"2025-01-01T00:00:00Z"')
+NOBODY=$(member 00000000-0000-0000-0000-000000000000 2026-06-01T00:00:00Z null)
+TOO_EARLY=$(move "$TEAM_A" "$TEAM_B" 2025-01-01T00:00:00Z)
+NOT_ON_IT=$(move "$TEAM_B" "$TEAM_A" 2026-06-01T00:00:00Z)
+check "an overlapping membership is a 409"  409                "$(code -b "$A" -H "$JSON" -d "$OVERLAP" "$BASE/teams/$TEAM_A/memberships")"
+check "...with a stable code"               membership_overlap "$(refusal "$OVERLAP" "$TEAM_A/memberships")"
+check "a membership ending before it starts" membership_period_invalid "$(refusal "$BACKWARDS" "$TEAM_B/memberships")"
+check "a membership for an unknown athlete" athlete_not_found  "$(refusal "$NOBODY" "$TEAM_A/memberships")"
+check "a transfer dated before the athlete joined" membership_period_invalid "$(refusal "$TOO_EARLY" transfers)"
+check "a transfer from a team the athlete is not on" no_open_membership "$(refusal "$NOT_ON_IT" transfers)"
+check "the refused transfer changed nothing" "$ATHLETE"        "$(json 'd.map(e=>e.athleteId).join(",")' -b "$A" "$BASE/teams/$TEAM_A/roster")"
 
 echo
 echo "Validation (on by default; a 200 never means \"nothing happened\")"

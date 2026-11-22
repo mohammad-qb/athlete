@@ -1,22 +1,26 @@
 import type { AthleteListQuery } from '@athlete/contracts';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { DataTable, dataTableColumns } from '@/components/data-table';
 import { type AthleteResponse, athletesListOptions } from '@/lib/api';
+import { Can } from '@/lib/authz';
+import { formatDate } from '@/lib/dates';
+import { CreateAthleteDialog } from '../components/create-athlete-dialog';
 
 const column = dataTableColumns<AthleteResponse>();
-
-const dateFormat = new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeZone: 'UTC' });
-
-/** A calendar date (`YYYY-MM-DD`) has no time zone; format it as the day it names. */
-function formatDate(date: string): string {
-  const parsed = new Date(date.length === 10 ? `${date}T00:00:00Z` : date);
-  return Number.isNaN(parsed.getTime()) ? date : dateFormat.format(parsed);
-}
 
 const columns = [
   column.accessor('lastName', {
     header: 'Last name',
-    cell: ({ row }) => <span className="font-medium">{row.original.lastName}</span>,
+    cell: ({ row }) => (
+      <Link
+        to="/athletes/$athleteId"
+        params={{ athleteId: row.original.id }}
+        className="font-medium underline-offset-4 hover:underline"
+      >
+        {row.original.lastName}
+      </Link>
+    ),
     meta: { sortKey: 'lastName' },
   }),
   column.accessor('firstName', {
@@ -67,6 +71,11 @@ export function AthletesListPage({
       searchLabel="Search athletes"
       emptyMessage="No athletes yet."
       noun={query.data?.total === 1 ? 'athlete' : 'athletes'}
+      actions={
+        <Can action="create" subject="athletes">
+          <CreateAthleteDialog />
+        </Can>
+      }
     />
   );
 }

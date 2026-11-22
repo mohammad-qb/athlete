@@ -99,8 +99,9 @@ In priority order, which is itself a statement about what we think matters:
    from an estimate into a number.
 2. **Finish the SPA's screens.** The OpenAPI document and the typed client are generated
    from the Zod contracts and kept current by CI, and the SPA's foundation is built on
-   them: sign-in, the shell, the athletes list, and the patterns later screens reuse.
-   Editing athletes, teams, sessions and the attendance register are not built yet.
+   them: sign-in, the shell, athletes and teams (including the conflict dialog for a
+   refused stale write), and the patterns later screens reuse. Sessions and the
+   attendance register are not built yet.
 3. **Apply the Terraform to a real subscription.** It is validated and tested against
    a mocked provider and has never been planned against Azure; every permission list
    in it is reasoned, not exercised. Then close the edge gaps it names: managed WAF
