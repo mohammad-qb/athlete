@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
 # Seeds the compose database for manual use: the demo academies, teams and athletes of
-# scripts/seed-demo.sql, plus two people who can sign in to Alpha Academy.
+# scripts/seed-demo.sql, plus three people who can sign in.
 #
-#   admin@alpha.test   academy_admin
-#   coach@alpha.test   coach, assigned to Team A
+#   admin@alpha.test   academy_admin of Alpha Academy
+#   coach@alpha.test   coach in Alpha Academy, assigned to Team A
+#   both@alpha.test    coach in Alpha Academy AND academy_admin of Beta Academy:
+#                      the account to try the academy switcher with
 #
-# Both share one password: $SEED_PASSWORD, or the default below. LOCAL USE ONLY.
+# All share one password: $SEED_PASSWORD, or the default below. LOCAL USE ONLY.
 #
 # Accounts are created with the operator CLI, in the migrate container, because that is
 # the only way an account comes to exist: public sign-up is disabled and neither service
@@ -21,6 +23,7 @@ cd "$(dirname "$0")/.."
 
 SEED_PASSWORD="${SEED_PASSWORD:-athlete-dev-password}"
 ACADEMY_A=11111111-1111-1111-1111-111111111111
+ACADEMY_B=22222222-2222-2222-2222-222222222222
 TEAM_A=66666666-6666-6666-6666-666666666666
 
 run_sql() { docker compose exec -T postgres psql -U postgres -d athlete -q -v ON_ERROR_STOP=1 "$@"; }
@@ -39,6 +42,8 @@ run_sql < scripts/seed-demo.sql > /dev/null
 echo "Creating accounts..."
 create_user admin@alpha.test 'Alpha Admin' "$ACADEMY_A" academy_admin > /dev/null
 COACH_ID=$(create_user coach@alpha.test 'Alpha Coach' "$ACADEMY_A" coach)
+create_user both@alpha.test 'Both Academies' "$ACADEMY_A" coach > /dev/null
+create_user both@alpha.test 'Both Academies' "$ACADEMY_B" academy_admin > /dev/null
 
 # The coach coaches Team A only; Team B exists beside it, which is what makes a coach's
 # scope observable. Fixed id, so running this twice does not open a second assignment.
@@ -51,4 +56,4 @@ on conflict (id) do nothing;
 commit;
 SQL
 
-echo "Done. Sign in as admin@alpha.test or coach@alpha.test with the seed password."
+echo "Done. Sign in as admin@alpha.test, coach@alpha.test or both@alpha.test with the seed password."

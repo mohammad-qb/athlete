@@ -1,12 +1,13 @@
 # `@athlete/eslint-config`
 
-Two flat configs, consumed by each workspace package through its own
+Three flat configs, consumed by each workspace package through its own
 `eslint.config.mjs`.
 
 | Entry point | Use for | What it adds |
 |---|---|---|
 | `@athlete/eslint-config/base` | plain JS at the repository root | `eslint:recommended`, `typescript-eslint` syntax rules, unused-variable policy |
 | `@athlete/eslint-config/nest` | `apps/api`, `packages/*` | the above **plus** type-aware rules via `projectService` |
+| `@athlete/eslint-config/react` | `apps/web` | the type-aware tier for the browser: the same promise rules, plus the two React hook rules |
 
 ## Why the type-aware tier is not optional
 

@@ -89,6 +89,8 @@ flowchart TB
 feature module reaches into a sibling's internals, or when anything outside a repository
 imports the database schema. Every legitimate exception to that last rule is written
 down in [`.dependency-cruiser.cjs`](./.dependency-cruiser.cjs) with its justification.
+The same check holds the SPA's structure: a feature never imports another feature, and
+is imported only through its `index.ts`.
 Authorization is enforced the same way rather than remembered: one
 [CASL](https://casl.js.org) ability definition is the whole policy, a route with no
 declared permission is refused, and a repository read does not compile without the row
@@ -270,7 +272,7 @@ rows. An administrator's access filter is empty (RLS is their only boundary), so
 flowchart TB
     subgraph gh["GitHub"]
         repo["Repository"]
-        ci["Actions CI<br/>typecheck · lint · boundaries · unit<br/>integration · smoke · terraform checks"]
+        ci["Actions CI<br/>typecheck · lint · boundaries · unit<br/>integration · smoke · e2e · terraform checks"]
         cd["Deploy (designed, not written)<br/>OIDC federated — no stored secret<br/>may write the app, not IAM or network"]
     end
 
@@ -327,6 +329,7 @@ pnpm run typecheck          # TypeScript across the workspace
 pnpm run lint               # type-aware ESLint; a dropped `await` is a build failure
 pnpm run lint:boundaries    # architecture fitness rules
 pnpm --filter @athlete/api run test              # unit — no Docker needed
+pnpm --filter @athlete/web run test              # the SPA's unit tests (jsdom)
 pnpm --filter @athlete/api run test:integration  # real Postgres via Testcontainers
 
 # after changing a route or a contract: regenerate what is generated from them
@@ -359,29 +362,43 @@ exporting by hand. A variable already set in the shell wins over the file
 beside it, one box.
 
 ```bash
-docker compose up -d --build        # postgres + api
+docker compose up -d --build        # postgres + api + web (the SPA, on :8080)
 docker compose run --rm migrate     # migrations as a SEPARATE step, as in CI
 ./scripts/smoke.sh                  # end-to-end checks over HTTP (seeds what it needs)
+pnpm --filter @athlete/web exec playwright install chromium   # once
+pnpm --filter @athlete/web run test:e2e   # the SPA in a real browser, same stack
 
-# if port 5432 or 3000 is already taken on your machine:
-POSTGRES_PORT=55432 API_PORT=3100 docker compose up -d --build
+# if port 5432, 3000 or 8080 is already taken on your machine:
+POSTGRES_PORT=55432 API_PORT=3100 WEB_PORT=8180 docker compose up -d --build
 POSTGRES_PORT=55432 docker compose run --rm migrate
-API_PORT=3100 ./scripts/smoke.sh
+API_PORT=3100 WEB_PORT=8180 ./scripts/smoke.sh
+WEB_PORT=8180 pnpm --filter @athlete/web run test:e2e
 ```
+
+### The web app
+
+With the stack up, migrated and seeded (`./scripts/seed-dev.sh`, below), open
+<http://localhost:8080> and sign in as `admin@alpha.test`, `coach@alpha.test` or
+`both@alpha.test` (two academies: the one to try the academy switcher with). The `web`
+service is nginx serving the built SPA and proxying `/api` to the API, so the browser
+sees one origin, as it does behind Front Door. To develop it, run the API on the host
+with `pnpm dev` and the SPA with `pnpm dev:web` (Vite on :5173, proxying `/api`). What is
+built so far, and how it is put together: [`apps/web/README.md`](./apps/web/README.md).
 
 ### Sign in
 
 There is no sign-up: an account is created by an operator, with the owner connection,
 the same way a migration is run. [`scripts/seed-dev.sh`](./scripts/seed-dev.sh) does
 that for a local stack — the demo academies, teams and athletes, plus an administrator
-and a coach of Alpha Academy:
+and a coach of Alpha Academy and one person who belongs to both academies:
 
 ```bash
-./scripts/seed-dev.sh               # admin@alpha.test, coach@alpha.test
+./scripts/seed-dev.sh               # admin@alpha.test, coach@alpha.test, both@alpha.test
                                     # password: $SEED_PASSWORD, default athlete-dev-password
 
-# sign in: the session comes back as an httpOnly cookie
-curl -c jar -H 'Content-Type: application/json' -H 'Origin: http://localhost:3000' \
+# sign in: the session comes back as an httpOnly cookie. The Origin is the SPA's
+# (APP_BASE_URL): the only origin whose state-changing requests the API accepts.
+curl -c jar -H 'Content-Type: application/json' -H 'Origin: http://localhost:8080' \
   -d '{"email":"coach@alpha.test","password":"athlete-dev-password"}' \
   http://localhost:3000/api/auth/sign-in/email
 
@@ -407,17 +424,24 @@ stack was started on a fresh volume:
 
 ```
 pnpm install --frozen-lockfile              ✓ lockfile unchanged
+pnpm run build                              ✓ 4 tasks (the SPA bundle included)
 pnpm run typecheck                          ✓ no errors (6 tasks)
-pnpm run lint                               ✓ no errors (6 tasks, type-aware)
-pnpm run lint:boundaries                    ✓ no violations (81 modules, 183 dependencies)
-pnpm run build                              ✓ 3 tasks
+pnpm run lint                               ✓ no errors (7 tasks, type-aware)
+pnpm run lint:boundaries                    ✓ no violations (API: 81 modules, 183 dependencies;
+                                              SPA: 69 modules, 115 dependencies)
 test (unit + route coverage + HTTP)         ✓ 309 passed (17 files)
+web test (Vitest, jsdom)                    ✓ 59 passed (7 files)
 test:integration (real Postgres)            ✓ 135 passed (10 files)
 web generate + git diff --exit-code         ✓ openapi.json and the generated client unchanged
-docker build -f apps/api/Dockerfile         ✓ image builds
-docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql, 0003_auth.sql
+docker compose up --build                   ✓ the api and web images build
+docker compose run migrate                  ✓ Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql, 0003_auth.sql
 ./scripts/smoke.sh (containerised stack)    ✓ 90/90 checks passed
+web test:e2e (Playwright, same stack)       ✓ 11 passed
 ```
+
+Smoke before end-to-end, as above: the end-to-end setup adds athletes to Alpha Academy
+so the list has a second page, and three of the smoke checks count Alpha's athletes
+from a fresh seed. CI runs the two in separate jobs, each on its own stack.
 
 The smoke run, verbatim, from that fresh volume. Every request after the first block
 carries a session cookie obtained by signing in over HTTP; "academy B sees an empty
@@ -698,8 +722,8 @@ on either alone is how an API that returns 401 to everyone passes CI.
 
 Scope choices, each one a decision rather than an omission:
 
-- **Web UI beyond the deployment shape.** The brief states frontend design is not being
-  assessed. `apps/web` holds the build target and the reasoning only.
+- **A designed web UI.** The brief states frontend design is not being assessed, so the
+  SPA is stock shadcn/ui (`dashboard-01`, light theme only) with no custom design work.
 - **Native mobile.** Out of scope — but the real-world gap is named: coaches mark
   attendance pitch-side on poor connectivity. The write API is therefore already
   idempotent (client-generated UUIDs + `Idempotency-Key`), so offline sync becomes a
@@ -719,11 +743,13 @@ Scope choices, each one a decision rather than an omission:
   works and is tested at the database, as the application role; no route does it. The
   rule that a departed coach keeps the assessments they authored is designed and has
   no route to apply to.
-- **The web application.** `apps/web` holds the typed client generated from
-  [`apps/api/openapi.json`](./apps/api/openapi.json) and nothing else yet: no screens.
-  The document is generated from the Zod contracts and the routes' declarations, and
-  both it and the client are checked for drift
-  ([`apps/web/README.md`](./apps/web/README.md)).
+- **Most of the web application's screens.** `apps/web` is a working SPA on the typed
+  client generated from [`apps/api/openapi.json`](./apps/api/openapi.json): sign in,
+  sign out, change password, the shell with a role-aware menu and an academy switcher,
+  and the athletes list. Creating and editing athletes, teams, sessions and the
+  attendance register are not built yet
+  ([`apps/web/README.md`](./apps/web/README.md),
+  [`docs/plans/frontend-v1.md`](./docs/plans/frontend-v1.md)).
 - **Backup cron, restore drill and backup-absence alerts.** Marked `STUB` in
   `infra/terraform/stacks/<env>/base/backup.tf`. Front Door and private networking for
   Postgres are written but unapplied, with their gaps (a rate-limit-only WAF, origins
@@ -751,7 +777,12 @@ apps/
     test/               unit + Testcontainers integration
     src/openapi/        the route walk and the OpenAPI generator
     openapi.json        GENERATED from the contracts and route metadata; committed
-  web/                  the generated, typed API client (no screens yet)
+  web/                  React + Vite SPA: shell, sign-in, athletes list (more screens to come)
+    src/routes/         thin route files: search schema, guard, loader
+    src/features/       one folder per feature, public through index.ts only
+    src/components/     shared composites; ui/ holds the shadcn primitives
+    src/lib/            generated API client, error mapper, auth, can()
+    e2e/                Playwright, against the compose stack
 packages/
   contracts/            Zod schemas — single source of truth
   config/               fail-fast env validation
@@ -766,7 +797,8 @@ docs/                   the written proposal (A–E of the brief)
   plans/                the phase-by-phase build record, deviations included
 scripts/                smoke check, demo data, dev accounts
 apps/api/Dockerfile     multi-stage, non-root, prod deps only
+apps/web/Dockerfile     the SPA behind nginx with /api proxied: one origin, for compose and e2e
 docker-compose.yml      local dev AND the single-server deployment answer
-.dependency-cruiser.cjs architecture fitness rules
+.dependency-cruiser.cjs architecture fitness rules (API layers, SPA features)
 lefthook.yml            pre-commit: the same lint and typecheck gates CI runs
 ```

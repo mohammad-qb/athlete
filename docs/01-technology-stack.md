@@ -153,6 +153,16 @@ there is no SEO requirement and no public page, so SSR would buy nothing concret
 Responsive web covers phones. Native mobile is deferred with a documented Expo path that
 reuses `packages/contracts`.
 
+**What is built.** `apps/web` is that SPA: React 19, Vite, TanStack Router, Query, Table
+and Form, shadcn/ui. So far it holds the foundation every screen reuses (the generated
+client, one error mapper, permissions read from `GET /me`, a server-driven list table,
+form fields that take the server's validation messages) and the first screens: sign in,
+change password, and the athletes list. Its structure is enforced like the API's: thin
+routes over features that may not import each other, checked by dependency-cruiser. In
+the compose stack an nginx container serves the bundle and proxies `/api`, reproducing
+the single origin Front Door provides; it is a local stand-in, not a second deployable.
+See [`apps/web/README.md`](../apps/web/README.md).
+
 ## 7. Authentication — better-auth, users in our own Postgres
 
 **Why self-hosted.** Two hard constraints decide this. **Residency**: Clerk and Auth0

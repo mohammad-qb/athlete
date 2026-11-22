@@ -13,4 +13,6 @@ coverage
 .env
 .env.*
 apps/api/test
-apps/web
+apps/web/e2e
+apps/web/test-results
+apps/web/playwright-report
