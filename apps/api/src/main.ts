@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { loadEnv } from '@athlete/config';
-import { AppModule } from './app.module';
+import { API_GLOBAL_PREFIX, AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
   const env = loadEnv();
@@ -10,7 +10,7 @@ async function bootstrap(): Promise<void> {
 
   // ETag is only useful to a browser client if it is allowed to read it.
   app.enableCors({ exposedHeaders: ['ETag'] });
-  app.setGlobalPrefix('api/v1');
+  app.setGlobalPrefix(API_GLOBAL_PREFIX);
 
   // Migrations run as their own CI job before deploy -- never here. Two replicas
   // booting at once would otherwise race each other through the same migration.

@@ -321,10 +321,10 @@ Run on macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2, `postgres:17-alpine`:
 ```
 pnpm run typecheck                          ✓ no errors (5 tasks)
 pnpm run lint                               ✓ no errors (6 tasks, type-aware)
-pnpm run lint:boundaries                    ✓ no violations (50 modules, 98 dependencies)
+pnpm run lint:boundaries                    ✓ no violations (56 modules, 112 dependencies)
 pnpm run build                              ✓ 3 tasks
-test (unit)                                 ✓ 52 passed  (4 files)
-test:integration (real Postgres)            ✓ 17 passed  (4 files)
+test (unit)                                 ✓ 129 passed (8 files)
+test:integration (real Postgres)            ✓ 26 passed  (5 files)
 docker build -f apps/api/Dockerfile         ✓ image builds
 docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql
 ./scripts/smoke.sh (containerised stack)    ✓ 16/16 checks passed
@@ -403,7 +403,12 @@ Each one exists to make a specific claim falsifiable.
 | `temporal.membership.integration` | Overlapping periods in the same team rejected; concurrent membership of *different* teams allowed; back-to-back periods permitted (`[)` bounds); inverted periods rejected; "who was on this team in March" answered from the period | "maintaining historical records" |
 | `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted; a replayed offline submission inserts nothing | "maintaining historical records when athletes change teams" |
 | `concurrency.optimistic-lock.integration` | Two writers hold version 0; the first wins, the second affects **zero rows** → 409, and the first writer's change survives; no row lock is held across user think-time | "two users update the same record simultaneously" |
-| `authz.route-coverage` | Walks the real module graph and fails if **any** route lacks `@Authorize` or `@Public`; the public allowlist is asserted explicitly | "secure access based on user roles and responsibilities" |
+| `authz.route-coverage` | Walks the real module graph and fails if **any** route lacks `@Permission` or `@Public`; every declared `(action, subject)` is in the shared vocabulary and every subject is claimed by a route or explicitly reserved; the public allowlist is asserted explicitly; the committed [route manifest](docs/reference/route-manifest.md), with paths as served under `/api/v1`, must match the code | "secure access based on user roles and responsibilities" |
+| `authz.ability.unit` | One CASL ability definition is the whole policy: grants per role; the operations each route demanded before are held by exactly the roles those routes listed; the coarse (guard) and scoped (query) modes agree on which operations exist, and scoped never grants what the guard refuses; a coach with no active assignment gets **no rule**, not a rule over an empty list | "secure access based on user roles and responsibilities" |
+| `authz.guard.unit` | The guard refuses an undeclared route even for a platform administrator, answers 401 without a principal, and decides from the ability rather than a role list on the route | "secure access based on user roles and responsibilities" |
+| `authz.to-sql-where.unit` | A rule condition compiles to the SQL it says (asserted on rendered text and bound parameters), agrees with the in-memory matcher on `NULL` — including ordering, where CASL coerces null to 0, cross-checked against the real matcher — and **throws** on an unknown operator, an unmapped field, a relation or a boolean ordering operand — a restriction is never silently dropped | — |
+| `authz.accessible-by.unit` | The query filter derived from an ability is unrestricted for an administrator, a predicate for a coach, and a **403** when nothing grants the action — never an unfiltered query | — |
+| `authz.principal-scope.integration` | A coach's scope follows the periods in the data at one instant: a closed assignment contributes no team, an athlete who left drops out, the period is half-open, the instant is the database transaction's `now()` rather than the host clock, and the same user's assignment in another academy is unreachable | "secure access based on user roles and responsibilities" |
 | `optimistic-concurrency.unit` | `If-Match`/`ETag` parsing, including malformed and weak validators; a stale write is a 409 carrying the version the caller held | "two users update the same record simultaneously" |
 | `api-error.unit` | Every error type maps to the status and log severity the contract promises, the type list is exhaustive (adding one without a status fails here), and `toJSON` cannot serialise `cause` | — |
 | `error-responder.unit` | One log line per failure at its own severity; `meta` logged for 5xx and withheld for 4xx; an unexpected error is redacted to `"Internal server error"` while the **whole cause chain** reaches the log, bounded and cycle-guarded; a 5xx `HttpException` is redacted the same way, payload and all, so choosing a status is not a claim the message is publishable; an `http-errors` 4xx keeps its status only when it marked itself exposable; a response already begun is closed rather than crashed | — |

@@ -7,7 +7,7 @@ import {
   Uuid,
 } from '@athlete/contracts';
 import { SessionsService } from './sessions.service';
-import { Authorize } from '../../common/authz/authorize.decorator';
+import { Permission } from '../../common/authz/permission.decorator';
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe';
 
 @Controller('sessions')
@@ -15,7 +15,7 @@ export class SessionsController {
   constructor(private readonly sessions: SessionsService) {}
 
   @Post()
-  @Authorize({ roles: ['academy_admin', 'coach'] })
+  @Permission({ action: 'create', subject: 'trainingSessions' })
   create(
     @Body(new ZodValidationPipe(CreateSessionRequest)) body: CreateSessionRequest,
   ): Promise<SessionResponse> {
@@ -23,7 +23,7 @@ export class SessionsController {
   }
 
   @Post(':id/attendance')
-  @Authorize({ roles: ['academy_admin', 'coach'] })
+  @Permission({ action: 'create', subject: 'sessionParticipants' })
   recordAttendance(
     @Param('id', new ZodValidationPipe(Uuid)) sessionId: string,
     @Body(new ZodValidationPipe(RecordAttendanceRequest)) body: RecordAttendanceRequest,
@@ -32,7 +32,7 @@ export class SessionsController {
   }
 
   @Get(':id/attendance')
-  @Authorize({ roles: ['academy_admin', 'coach'] })
+  @Permission({ action: 'read', subject: 'sessionParticipants' })
   register(@Param('id', new ZodValidationPipe(Uuid)) sessionId: string): Promise<ParticipationResponse[]> {
     return this.sessions.register(sessionId);
   }
