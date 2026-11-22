@@ -241,7 +241,7 @@ docker compose up -d --build && docker compose run --rm migrate && ./scripts/smo
 
 **Verified on 2026-11-22** (macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2,
 `postgres:17-alpine`): typecheck 5 tasks clean; `lint` 6 tasks clean; `lint:boundaries`
-no violations (50 modules, 98 dependencies); unit 47 passed (4 files); integration 17
+no violations (50 modules, 98 dependencies); unit 52 passed (4 files); integration 17
 passed (4 files); `docker compose run --rm migrate` → `Applied: 0000_init.sql,
 0001_rls.sql`; `smoke.sh` 16/16.
 
@@ -291,6 +291,31 @@ line carried the full failing SQL, its bound parameters and the tenant id.
 - **Smoke now asserts bodies, not only statuses.** Four checks read `type` and `code`
   out of the error body, because that is where the contract actually lives. 11 checks
   became 16.
+- **Open follow-up, decided deliberately:** every 5xx is redacted to the one blanket
+  message, so a `503` says `"Internal server error"` rather than signalling "retry". It
+  stays blanket because nothing throws a 5xx `HttpException` today. The first endpoint
+  that wants an honest 503 needs a 5xx-safe message allowlist plus `Retry-After`, not a
+  loosening of the redaction — the status code carries the retry signal until then.
+- **The log walks the whole `cause` chain**, bounded at 5 and cycle-guarded, rather than
+  serialising its first step. This was a real loss, not a tidiness point: Drizzle wraps
+  every database failure in a `DrizzleQueryError` carrying the SQL and parameters and
+  attaches the `pg` error as *its* cause, and `captureStackTrace` means the driver's
+  message appears in no stack either. Verified against the live stack — the same request
+  that previously logged only `Failed query: select ...` now also logs
+  `error: invalid input syntax for type timestamp with time zone`, which is the only
+  step that says *why*. At 4xx severities no stack is logged at all, so one step there
+  meant no diagnosis whatsoever.
+- **`engines.node >= 22.12.0` is advisory, and stays that way — tested, not assumed.**
+  pnpm 11.21.0 only *warns* on a root `engines` mismatch and exits 0; `engine-strict=true`
+  in `.npmrc` does not change that, because it governs dependencies' engines rather than
+  the project's own (verified against a throwaway package declaring `node >=99`). So no
+  `.npmrc` was added: it would have been configuration whose comment claimed an
+  enforcement it does not perform. CI's `node-version: 22` and the Dockerfile's
+  `node:22-alpine` both resolve to the newest 22.x, which cannot be below 22.12.0, and
+  `setup-node` has no way to say "latest 22.x, at least 22.12" — a range like `>=22.12`
+  would also match Node 24 and silently move CI off the target major. Enforcing the floor
+  for real would take a hand-rolled `preinstall` semver guard, which does not pay for
+  itself against an 11-patch window of Node 22 that ages out on its own.
 
 ---
 
@@ -510,6 +535,13 @@ Closes defect 4.
 - Query parameters are in scope, not just bodies: `?at=<garbage>` on the roster route is
   defect 6 today (a 500 from an Invalid Date reaching the driver). `rosterAt`'s `at` must
   parse through a declared query schema.
+- **Carried over from phase 1:** `HttpExceptionFilter.extractMeta()` forwards a 4xx
+  exception's whole payload minus Nest's `message`/`error`/`statusCode`, so a guard or
+  third-party exception that attaches internal state to a 4xx body publishes it. Left
+  open in phase 1 on purpose: a key allowlist would be brittle, it is not a regression
+  (Nest's own default filter publishes the same payload), and this phase deletes
+  `ZodValidationPipe` and reshapes validation `meta` into `meta.fields` anyway. Decide it
+  here, when the 4xx `meta` shape is being defined rather than guessed at.
 
 **Tasks.**
 

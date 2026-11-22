@@ -323,7 +323,7 @@ pnpm run typecheck                          ✓ no errors (5 tasks)
 pnpm run lint                               ✓ no errors (6 tasks, type-aware)
 pnpm run lint:boundaries                    ✓ no violations (50 modules, 98 dependencies)
 pnpm run build                              ✓ 3 tasks
-test (unit)                                 ✓ 47 passed  (4 files)
+test (unit)                                 ✓ 52 passed  (4 files)
 test:integration (real Postgres)            ✓ 17 passed  (4 files)
 docker build -f apps/api/Dockerfile         ✓ image builds
 docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql
@@ -406,7 +406,7 @@ Each one exists to make a specific claim falsifiable.
 | `authz.route-coverage` | Walks the real module graph and fails if **any** route lacks `@Authorize` or `@Public`; the public allowlist is asserted explicitly | "secure access based on user roles and responsibilities" |
 | `optimistic-concurrency.unit` | `If-Match`/`ETag` parsing, including malformed and weak validators; a stale write is a 409 carrying the version the caller held | "two users update the same record simultaneously" |
 | `api-error.unit` | Every error type maps to the status and log severity the contract promises, the type list is exhaustive (adding one without a status fails here), and `toJSON` cannot serialise `cause` | — |
-| `error-responder.unit` | One log line per failure at its own severity; `meta` logged for 5xx and withheld for 4xx; an unexpected error is redacted to `"Internal server error"` while the original reaches the log; an `http-errors` 4xx keeps its status only when it marked itself exposable; a response already begun is closed rather than crashed | — |
+| `error-responder.unit` | One log line per failure at its own severity; `meta` logged for 5xx and withheld for 4xx; an unexpected error is redacted to `"Internal server error"` while the **whole cause chain** reaches the log, bounded and cycle-guarded; a 5xx `HttpException` is redacted the same way, payload and all, so choosing a status is not a claim the message is publishable; an `http-errors` 4xx keeps its status only when it marked itself exposable; a response already begun is closed rather than crashed | — |
 
 ### Three findings from actually running this
 

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   HttpException,
   HttpStatus,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
   type ArgumentsHost,
@@ -99,6 +100,67 @@ describe('ErrorResponder', () => {
     expect(logs).toHaveLength(1);
     expect(logs[0]?.level).toBe('warn');
     expect(logs[0]?.line).toContain('http.request.failed');
+  });
+
+  /**
+   * The shape every database failure actually arrives in. Drizzle wraps the driver
+   * error in a `DrizzleQueryError` whose message is the SQL and its parameters, and
+   * attaches the `pg` error as ITS cause -- so the step that names the violated
+   * constraint is two deep. It captures its own stack, so that message is in no stack
+   * either. Logging one level means a line that says a query failed without saying why.
+   */
+  it('logs the whole cause chain, not just its first step', () => {
+    const driverError = Object.assign(
+      new Error('duplicate key value violates unique constraint "athletes_pkey"'),
+      { name: 'error', code: '23505' },
+    );
+    const wrapped = Object.assign(
+      new Error('Failed query: insert into "athletes" ...'),
+      { name: 'DrizzleQueryError', cause: driverError },
+    );
+
+    const { host } = fakeResponse();
+    responder.respond(
+      new ApiError('Internal server error', {
+        type: ApiErrorType.DATABASE,
+        cause: wrapped,
+      }),
+      host,
+    );
+
+    expect(logs[0]?.line).toContain('Failed query');
+    // The diagnosis worth having.
+    expect(logs[0]?.line).toContain('athletes_pkey');
+    expect(logs[0]?.line).toContain('<-');
+  });
+
+  it('survives a self-referential cause instead of hanging the error path', () => {
+    const a = new Error('outer');
+    const b = new Error('inner');
+    a.cause = b;
+    b.cause = a;
+
+    const { host } = fakeResponse();
+    responder.respond(
+      new ApiError('Internal server error', { type: ApiErrorType.INTERNAL, cause: a }),
+      host,
+    );
+
+    expect(logs[0]?.line).toContain('outer');
+    expect(logs[0]?.line).toContain('inner');
+  });
+
+  it('stops the walk at a cause that is not an Error', () => {
+    const outer = Object.assign(new Error('wrapper'), { cause: 'a bare string' });
+
+    const { host } = fakeResponse();
+    responder.respond(
+      new ApiError('Internal server error', { type: ApiErrorType.INTERNAL, cause: outer }),
+      host,
+    );
+
+    expect(logs[0]?.line).toContain('wrapper');
+    expect(logs[0]?.line).not.toContain('a bare string');
   });
 
   it('logs a 5xx at error level with the cause for correlation', () => {
@@ -244,6 +306,46 @@ describe('HttpExceptionFilter', () => {
     const response = normalise(new HttpException('Teapot', 418));
     expect(response.statusCode).toBe(418);
     expect(response.body?.type).toBe('BAD_REQUEST');
+  });
+
+  /**
+   * Choosing a 5xx `HttpException` says what the status is, not that the message is
+   * fit to publish -- and Nest's own filter publishes it regardless. A 500 must come
+   * out of this filter looking exactly like a 500 out of the catch-all, or the leak is
+   * just one `throw` away.
+   */
+  it('redacts a 5xx exactly as the catch-all does, keeping the detail in the log', () => {
+    const logs = captureLogs();
+    const { response, host } = fakeResponse();
+    new HttpExceptionFilter(new ErrorResponder()).catch(
+      new InternalServerErrorException('relation athletes does not exist'),
+      host,
+    );
+
+    expect(response.statusCode).toBe(500);
+    expect(response.body).toMatchObject({
+      message: 'Internal server error',
+      type: 'INTERNAL',
+    });
+    expect(JSON.stringify(response.body)).not.toContain('athletes');
+
+    expect(logs[0]?.level).toBe('error');
+    expect(logs[0]?.line).toContain('relation athletes does not exist');
+  });
+
+  /** The thrower's structured payload is internal state for a 5xx; the log keeps it. */
+  it('withholds the payload of a 5xx from meta', () => {
+    captureLogs();
+    const { response, host } = fakeResponse();
+    new HttpExceptionFilter(new ErrorResponder()).catch(
+      new HttpException({ message: 'Upstream refused', host: '10.0.0.4:5432' }, 503),
+      host,
+    );
+
+    expect(response.statusCode).toBe(503);
+    expect(response.body?.message).toBe('Internal server error');
+    expect(response.body?.meta).toBeUndefined();
+    expect(JSON.stringify(response.body)).not.toContain('10.0.0.4');
   });
 });
 
