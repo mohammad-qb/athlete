@@ -1,5 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import type { AthleteResponse, CreateAthleteRequest, UpdateAthleteRequest } from '@athlete/contracts';
+import type {
+  AthleteListQuery,
+  AthletePage,
+  AthleteResponse,
+  CreateAthleteRequest,
+  UpdateAthleteRequest,
+} from '@athlete/contracts';
 import { AthletesRepository, type AthleteRow } from './athletes.repository';
 import { assertCan } from '../../common/authz/assert-can';
 import { staleWrite } from '../../common/http/optimistic-concurrency';
@@ -12,11 +18,11 @@ export class AthletesService {
    * The guard has already answered "may this role list athletes at all". Which ones is
    * the access filter: an administrator's is unrestricted, a coach's is the athletes on
    * the teams they coach now, and a coach with none is refused outright rather than
-   * shown an empty page.
+   * shown an empty page. `total` is counted under the same filter.
    */
-  async list(): Promise<AthleteResponse[]> {
-    const rows = await this.repository.list(this.repository.accessFilter('read'));
-    return rows.map(toResponse);
+  async list(query: AthleteListQuery): Promise<AthletePage> {
+    const { rows, total } = await this.repository.page(query, this.repository.accessFilter('read'));
+    return { items: rows.map(toResponse), total, page: query.page, pageSize: query.pageSize };
   }
 
   async getById(id: string): Promise<AthleteResponse> {

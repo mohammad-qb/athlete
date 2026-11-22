@@ -1,5 +1,7 @@
 import { Controller, Get } from '@nestjs/common';
+import { HealthResponse } from '@athlete/contracts';
 import { Public } from '../common/authz/permission.decorator';
+import { Responds } from '../common/validation/responds.decorator';
 
 @Controller('health')
 export class HealthController {
@@ -10,7 +12,8 @@ export class HealthController {
    */
   @Get()
   @Public()
-  live(): { status: 'ok'; uptimeSeconds: number } {
+  @Responds(HealthResponse)
+  live(): HealthResponse {
     return { status: 'ok', uptimeSeconds: Math.floor(process.uptime()) };
   }
 }

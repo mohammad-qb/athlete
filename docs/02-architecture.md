@@ -71,6 +71,7 @@ schema, so it needs no exception at all.
 | Authentication | `AuthenticationGuard` (global) | Attaches a principal or nothing; never rejects, so the refusal decision stays in one place. A guard rather than middleware: see the README's second finding |
 | Route authorization | `AuthorizationGuard` (global, deny-by-default) | Asks the **coarse** ability "may this role ever do this?". A route with no declaration is refused |
 | Input validation | `@Validate` + `ValidationInterceptor` (global) | Schemas from `packages/contracts`; a handler that reads input it declared no schema for is refused, so forgetting fails closed. Runs before the transaction opens |
+| Output encoding | `@Responds` + `ResponseInterceptor` (global) | Every response is encoded through the schema its route declared: an undeclared field is stripped, and a result that does not fit is a 500 (`response_contract_violation`) rather than a leaked shape. Innermost, so a violation rolls the transaction back. A route that declares nothing is refused before its handler runs |
 | Tenant scoping | `TenantTransactionInterceptor` + RLS | Must be impossible to forget, so it is structural rather than per-query |
 | Resource authorization | The **scoped** ability: `accessFilter` in repositories, `assertCan` in services | "To which rows?" Relational and temporal; needs the database, and deserves a real 403 rather than an empty result |
 | What the database will accept | A privilege matrix on the application's role | The floor under all of the above; see [below](#the-floor-what-the-database-refuses) |
@@ -152,11 +153,15 @@ earlier (`authz.resource-scoping.integration`). The second half is designed and 
 built**: `assessments` is a reserved subject whose author field is already in the
 policy's row types, but no rule grants on it and no route serves it in this slice.
 
-**403 or 404.** A principal who names a scope key they do not hold — an athlete id, a
-team id — is told so: 403, before any read, and the answer is the same whether or not
-the row exists. A row that is merely absent from the filtered result is a 404. A coach
-with **no** active assignment gets no rule at all rather than a rule over an empty
-list, so they get a 403 that says why instead of an inexplicably empty page.
+**403 or 404.** Which one depends on how the route checks, not on what was named. Where
+a service asks `assertCan` with the scope key from the request — reading or editing an
+athlete, a team's roster, opening a session for a team — a principal who does not hold
+that key is told so: 403, before any read, and the answer is the same whether or not
+the row exists. Where a read is only filtered — `GET /teams/:id` and `GET /sessions/:id`,
+the deep-link reads — a row outside the principal's scope is absent from the filtered
+result and is a 404, indistinguishable from a row that is not there. A coach with **no**
+active assignment gets no rule at all rather than a rule over an empty list, so they get
+a 403 that says why, on every one of these routes, instead of an inexplicably empty page.
 
 **Tenancy is not in the policy.** No rule carries an `academyId` condition. RLS draws
 the tenant boundary on the transaction every query runs in; a tenant clause in the

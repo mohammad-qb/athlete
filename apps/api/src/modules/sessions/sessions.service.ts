@@ -3,6 +3,8 @@ import type {
   CreateSessionRequest,
   ParticipationResponse,
   RecordAttendanceRequest,
+  SessionListQuery,
+  SessionPage,
   SessionResponse,
 } from '@athlete/contracts';
 import { SessionsRepository, type ParticipantRow, type SessionRow } from './sessions.repository';
@@ -34,6 +36,27 @@ export class SessionsService {
       location: input.location,
     });
     return toSessionResponse(row);
+  }
+
+  /**
+   * An administrator's list is every session in the academy; a coach's is the sessions
+   * of the teams they coach now, with a `total` counted under the same filter.
+   */
+  async listSessions(query: SessionListQuery): Promise<SessionPage> {
+    const { rows, total } = await this.repository.pageOfSessions(
+      query,
+      this.repository.accessFilter('read', 'trainingSessions'),
+    );
+    return {
+      items: rows.map(toSessionResponse),
+      total,
+      page: query.page,
+      pageSize: query.pageSize,
+    };
+  }
+
+  async getSession(sessionId: string): Promise<SessionResponse> {
+    return toSessionResponse(await this.readableSession(sessionId));
   }
 
   /**

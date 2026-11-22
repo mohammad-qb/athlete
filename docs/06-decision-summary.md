@@ -97,8 +97,9 @@ In priority order, which is itself a statement about what we think matters:
 
 1. **Run the restore drill for real** and record the measured time — converting the RTO
    from an estimate into a number.
-2. **Generate the OpenAPI document and the typed client**, closing the loop on the
-   single-source-of-truth claim.
+2. **Build the SPA on the generated client.** The OpenAPI document and the typed client
+   are now generated from the Zod contracts and kept current by CI; the screens that
+   use them are not built yet.
 3. **Apply the Terraform to a real subscription.** It is validated and tested against
    a mocked provider and has never been planned against Azure; every permission list
    in it is reasoned, not exercised. Then close the edge gaps it names: managed WAF

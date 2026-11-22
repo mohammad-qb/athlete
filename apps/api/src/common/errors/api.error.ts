@@ -14,6 +14,8 @@
  * a client could not write one error handler.
  */
 
+import type { ErrorResponse, ErrorType } from '@athlete/contracts';
+
 /** Severity the responder logs at. Mapped from status unless stated explicitly. */
 export type ApiErrorLogLevel = 'error' | 'warn' | 'info' | 'debug';
 
@@ -29,7 +31,9 @@ export const ApiErrorType = {
   DATABASE: 'DATABASE',
   TIMEOUT: 'TIMEOUT',
   UNKNOWN: 'UNKNOWN',
-} as const;
+  // Tied to the contracts enum both ways: a category missing here, or one the published
+  // contract does not list, is a compile error rather than a body a client cannot type.
+} as const satisfies { [Type in ErrorType]: Type };
 export type ApiErrorType = (typeof ApiErrorType)[keyof typeof ApiErrorType];
 
 /**
@@ -79,16 +83,11 @@ export interface ApiErrorOptions {
  * driver messages, SQL and connection strings, and belongs in logs only. Because it is
  * impossible to serialise, a caller can always attach the real error without having to
  * reason about whether it leaks.
+ *
+ * The shape is the contract's (`ErrorResponse` in `packages/contracts`), which is also
+ * what the OpenAPI document publishes for every error status.
  */
-export interface ApiErrorResponse {
-  statusCode: number;
-  name: string;
-  message: string;
-  type: ApiErrorType;
-  code?: string;
-  explanation?: string;
-  meta?: Record<string, unknown>;
-}
+export type ApiErrorResponse = ErrorResponse;
 
 export class ApiError extends Error {
   readonly type: ApiErrorType;
