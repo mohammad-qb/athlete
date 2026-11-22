@@ -31,7 +31,22 @@ async function bootstrap(): Promise<void> {
   new Logger('bootstrap').log(`API listening on :${env.PORT} (${env.NODE_ENV})`);
 }
 
+/**
+ * A refused connection arrives as an `AggregateError` (one attempt per address family)
+ * whose own message is empty -- the reason lives in `errors`, and for a wrapped driver
+ * error in `cause`. Walk both so the boot failure names what actually went wrong.
+ */
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const nested = [
+    ...(error instanceof AggregateError ? (error.errors as unknown[]) : []),
+    ...(error.cause === undefined ? [] : [error.cause]),
+  ].map(describeError);
+  const own = error.message || error.name;
+  return nested.length === 0 ? own : `${own}: ${[...new Set(nested)].join('; ')}`;
+}
+
 bootstrap().catch((error: unknown) => {
-  new Logger('bootstrap').error(error instanceof Error ? error.message : String(error));
+  new Logger('bootstrap').error(describeError(error));
   process.exit(1);
 });
