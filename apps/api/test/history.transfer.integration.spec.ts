@@ -25,7 +25,7 @@ describe('history survives a transfer', () => {
 
   beforeAll(async () => {
     db = await startTestDatabase();
-    academy = await seedAcademy(db.pool, 'Fujairah Academy');
+    academy = await seedAcademy(db, 'Fujairah Academy');
   }, 180_000);
 
   afterAll(async () => {
@@ -122,8 +122,10 @@ describe('history survives a transfer', () => {
   });
 
   it('refuses to delete an athlete who has recorded history', async () => {
-    // ON DELETE RESTRICT on recorded facts. A register that can be silently emptied by
-    // deleting a parent row is not a historical record.
+    // Two independent refusals. The application role holds no DELETE on a parent of
+    // facts at all; and for a role that does -- the owner -- ON DELETE RESTRICT still
+    // holds. A register that can be silently emptied by deleting a parent row is not a
+    // historical record, whoever is doing the deleting.
     const team = await createTeam(db.pool, academy.academyId, 'Deletion Test XI');
     const athlete = await createAthlete(db.pool, academy.academyId, 'Record', 'Keeper');
     await addMembership(db.pool, academy.academyId, team, athlete, '2026-01-01T00:00:00Z', null);
@@ -149,6 +151,10 @@ describe('history survives a transfer', () => {
       asAcademy(db.pool, academy.academyId, (client) =>
         client.query('delete from athletes where id = $1', [athlete]),
       ),
+    ).rejects.toThrow(/permission denied for table athletes/i);
+
+    await expect(
+      db.adminPool.query('delete from athletes where id = $1', [athlete]),
     ).rejects.toThrow(/violates foreign key constraint/i);
   });
 

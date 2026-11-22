@@ -20,14 +20,14 @@ sync client, no OpenAPI client generation beyond the document itself, and no mov
 |---|---|---|
 | 1 | Repo guardrails + error contract | done |
 | 2 | Authorization model (CASL + SQL compiler) | done |
-| 3 | Enforce scoping (the live hole) | not started |
-| 4 | Database privileges + fact immutability | not started |
+| 3 | Enforce scoping (the live hole) | done |
+| 4 | Database privileges + fact immutability | done |
 | 5 | Validation on by default | not started |
 | 6 | Terraform restructure + secrets | not started |
 | 7 | Docs, ADRs, verified state | not started |
 
-**Current phase:** 2 — done.
-**Recommended next phase:** 3.
+**Current phase:** 4 — done (3 and 4 were delivered together).
+**Recommended next phase:** 5.
 
 Phase 6 touches no application code and may run in parallel with 2–5 if two sessions are
 available; every other phase depends on the one before it.
@@ -155,13 +155,14 @@ import that habit.
 
 1. `GET /athletes`, `GET /teams/:id/roster` and `POST /sessions` run **no** resource check, so
    any coach reads every athlete and every team's roster at any date — including a coach whose
-   assignment has closed, which is the exact case docs/02 uses to justify the design. Phase 3.
+   assignment has closed, which is the exact case docs/02 uses to justify the design.
+   Phase 3 — **closed**.
 2. `grant select, insert, update, delete on all tables` plus blanket `alter default privileges`:
    one DB role with full DML everywhere, including `DELETE` on recorded facts and writes to
-   `user_academy_roles`. Phase 4.
+   `user_academy_roles`. Phase 4 — **closed**.
 3. `session_participants → training_sessions` and `team_memberships → teams` are
    `ON DELETE CASCADE`, so deleting a parent empties a register the README claims is protected.
-   Phase 4.
+   Phase 4 — **closed**.
 4. `PATCH /athletes/:id` with a misspelled field validates to `{}` and returns **200 with a
    bumped ETag having changed nothing**, invalidating every other client's ETag. Phase 5.
 5. A dropped `await` on a policy assertion silently skips authorization; no test would catch it.
@@ -171,6 +172,13 @@ import that habit.
    verifying phase 1's catch-all filter. The redaction holds (the client learns nothing,
    the log carries the SQL), but a client error is being reported as a server fault.
    Phase 5 — it is the query-schema half of defect 4, and `@Validate({ query })` closes it.
+7. The compose stack's API connected as the **`postgres` superuser**, so RLS was not
+   applied to any request the smoke script made: every "tenant isolation over HTTP" check
+   passed on the repositories' `academy_id` predicates alone. Found in phase 4, when the
+   boot assertion refused the URL. Phase 4 — **closed**.
+8. `docker compose run --rm migrate` ran a **stale image**. `migrate` sits behind a
+   profile, so `up --build` never rebuilt it, and it reported "Already up to date"
+   against a tree with a new migration. Found the same way. Phase 4 — **closed**.
 
 ---
 
@@ -485,11 +493,11 @@ currently coach. This closes defect 1.
 
 **Tasks.**
 
-- [ ] required filter parameter on repository reads; all call sites updated
-- [ ] four endpoints scoped through the ability
-- [ ] `PolicyService` deleted; boundary exception removed
-- [ ] two-team fixture + resource-scoping integration spec
-- [ ] smoke checks added
+- [x] required filter parameter on repository reads; all call sites updated
+- [x] four endpoints scoped through the ability
+- [x] `PolicyService` deleted; boundary exception removed
+- [x] two-team fixture + resource-scoping integration spec
+- [x] smoke checks added
 
 **Exit criteria.**
 
@@ -499,8 +507,45 @@ Full command block green, plus:
 - `pnpm run lint:boundaries` passes with a **shorter** exception list than before.
 - `smoke.sh` reports its new total (update the README block).
 
+**Verified on 2026-11-22**, together with phase 4 (macOS, Node 24.14.1, pnpm 11.21.0,
+Docker 28.3.2, `postgres:17-alpine`): typecheck 5 tasks clean; `lint` 6 tasks clean;
+`lint:boundaries` no violations (58 modules, 123 dependencies) with the
+`policy.service.ts` exception gone; unit 150 passed (9 files); integration 67 passed
+(7 files); `smoke.sh` 18/18 (numbers as of the phase 4 review fixes; 140 / 54 before them). The "fails when a filter is removed" criterion was run as a
+mutation check rather than assumed: each of the 8 places a repository applies its access
+predicate was deleted in turn, and the resource-scoping spec failed every time.
+
 ### Deviations
-_(none yet)_
+- **The filter is called `access` and comes from the repository.** Each repository
+  exposes `accessFilter(action[, subject])`, which wraps `accessibleBy` with that
+  repository's column map; services pass its result back in as the required parameter.
+  The column maps cannot live in services (`no-sql-outside-repositories`), and are tied
+  to `SubjectRows` with `satisfies`, so a rule on a new field does not compile until its
+  column is mapped.
+- **Writes take the filter too.** `updateIfVersionMatches` has the same required
+  parameter as the reads; the plan named reads only.
+- **Out of scope is 403 when the request names the scope key, 404 otherwise.** A new
+  synchronous `assertCan(action, subject, row)` (`common/authz/assert-can.ts`, code
+  `AUTHZ_OUT_OF_SCOPE`) runs first where the caller already holds the conditioned field:
+  the athlete id, the team id of a roster, the team of a session being created. A row
+  that is merely absent from the filter is a 404. **Behaviour change:** a coach reading
+  or recording attendance on another team's *session* now gets 404 where
+  `PolicyService` gave 403, because the session row is no longer loaded unfiltered.
+- **A historical roster is filtered by membership scope only.** The athletes join is not
+  filtered by today's athlete scope, or a past roster would lose everyone who has since
+  left the team.
+- **The closed-assignment test travels in time through `asOf`.** "Could read it last
+  month" is shown by resolving the same coach's scope at an instant 30 days ago, not by
+  mutating data. Fixture dates are relative to now (`daysAgo`).
+- **A repository-level block was added to the spec.** Services both instance-check and
+  filter, so through them alone a repository that ignored its predicate would go
+  unnoticed for `getById` and `rosterAt`.
+- **A coach whose team has no athletes gets 403 on `GET /athletes`**, not an empty list:
+  phase 2's "no rule for an empty set" applies to `visibleAthleteIds` as well. Left as
+  built; arguably an empty roster is not an authorization failure, and that is a
+  product call.
+- **Docs not touched beyond the README numbers.** `docs/02` and the README's sequence
+  diagram still describe `PolicyService`; that is phase 7.
 
 ---
 
@@ -545,11 +590,11 @@ no indirect deletion through a cascading parent. Closes defects 2 and 3.
 
 **Tasks.**
 
-- [ ] `0002_grants.sql` with the full matrix, default-privilege revoke, columns, index surgery, FK flips
-- [ ] shared active-row predicate wired through reads and ability conditions
-- [ ] boot-time privilege assertion + unit test for the refusal
-- [ ] isolation suite extended with the five negative assertions
-- [ ] correction path: void + re-insert works end to end
+- [x] `0002_grants.sql` with the full matrix, default-privilege revoke, columns, index surgery, FK flips
+- [x] shared active-row predicate wired through reads and ability conditions
+- [x] boot-time privilege assertion + unit test for the refusal
+- [x] isolation suite extended with the five negative assertions
+- [x] correction path: void + re-insert works end to end
 
 **Exit criteria.**
 
@@ -563,8 +608,85 @@ docker compose run --rm migrate     # Applied: 0000_init.sql, 0001_rls.sql, 0002
 - Voiding a participation row and inserting its replacement succeeds; the same without the
   partial index would have violated the old constraint.
 
+**Verified on 2026-11-22** (same machine and numbers as phase 3). Run against the
+existing local volume, `migrate` printed `Applied: 0002_grants.sql`; against a fresh
+volume, `Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql`, then `smoke.sh` 18/18
+in both. Started with the owner URL, the API exits with `Refusing to start:
+DATABASE_URL connects as "postgres" ...` listing its reasons (three since the review:
+superuser, BYPASSRLS, owner).
+
 ### Deviations
-_(none yet)_
+- **The compose stack had to change, because it was the case the assertion exists for**
+  (defect 7). `api` now connects as `athlete_app`; `migrate` keeps the owner URL and,
+  when `APP_ROLE_PASSWORD` is set, gives the role a login password
+  (`provisionAppRoleLogin` in `migrate.ts`, also used by the test harness). Local and
+  test only: production provisions that credential from Key Vault and leaves the
+  variable unset. `.env.example` follows.
+- **`api` has `restart: on-failure`, and `smoke.sh` waits for health.** Before `migrate`
+  runs there is no role to connect as, so the API exits; the documented
+  `up` → `run --rm migrate` → `smoke.sh` sequence still works unchanged because compose
+  retries it. The alternative (`depends_on: migrate`) would have made migrations
+  implicit in `up`, against the "separate step" argument.
+- **`api` and `migrate` share one image name** (`athlete/api:local`) — defect 8.
+- **The boot assertion checks five things, not three**: also table ownership (a
+  non-superuser owner passes the plan's three checks only by accident of `DELETE`) and
+  `INSERT` on `user_academy_roles`; an unmigrated database is its own refusal. A
+  database that is unreachable at boot now stops the API from starting, where before it
+  started and failed per request.
+- **No `DELETE` for the application role on any table**, not only on facts and their
+  parents. Nothing in the API deletes.
+- **`valid_to` is updatable on `team_memberships`**, beside the voiding columns: closing
+  a period is how a transfer works. `status` on `session_participants` is *not*
+  updatable — the plan's "voiding/status columns" was read as the voiding columns, since
+  editing a status in place is what voiding replaces.
+- **Grants the plan did not enumerate:** `academies` is `SELECT` only; `users` gets
+  nothing (see the review bullet below);
+  `team_coach_assignments` is `SELECT`, `INSERT`, `UPDATE (valid_to)`; `_migrations`
+  gets nothing. Consequence for tests: `seedAcademy` takes the `TestDatabase` and
+  provisions users, academies and role grants as the superuser.
+- **`team_memberships → athletes` was flipped to `RESTRICT` as well.** The plan named
+  the team FK only; the athlete FK cascaded the same history away.
+  `academy_id → academies` still cascades everywhere, deliberately.
+- **A `CHECK` ties `voided_at` to `voided_by`** on all three fact tables: a void without
+  an author is rejected.
+- **The shared predicate is `isActive(table)` in `common/db/active-row.ts`.** It takes
+  the table as a parameter, so no boundary exception. "The ability's membership
+  conditions" turned out to mean the scope resolver, which is where memberships are read.
+- **Tests live in a new `privileges.matrix.integration` spec**, not in
+  `tenancy.isolation`: that file argues tenant isolation, and these refusals are
+  asserted *inside* the tenant. `history.transfer`'s deletion test now asserts both
+  layers (privilege for the app role, FK for the owner).
+- **Not built: a void endpoint.** Non-goals rule out new product surface, so the
+  correction path is proven at the database, as the application role. Nothing in the
+  API writes `voided_at` yet. (Voiding was first left reversible at the database; the
+  review bullets below close that.)
+- **`alter default privileges ... revoke` only undoes 0001's default for the role that
+  ran 0001.** True for a single migration identity; stated in the migration.
+- **Review: `athlete_app` has no privilege on `users`.** The table holds
+  `password_hash` and has no RLS policy, and nothing in the API reads it.
+- **Review: `valid_to` and the voiding columns are final once set** (trigger
+  `app_final_once_set` in `0002`): NULL → value once, for every role that does not own
+  the table. The owner is exempt so the platform can still repair a row.
+- **Review: the boot assertion compares the whole matrix**, not one sampled table per
+  privilege: any table- or column-level privilege beyond `PRIVILEGE_MATRIX` on a table
+  it names is a refusal. A superuser or owner is now reported with three reasons, not
+  five. Tables a later migration adds are not judged.
+- **Review: `0002_grants.sql` was edited after it had been applied locally** (it is
+  uncommitted). The runner will not re-apply a file by the same name, so the one local
+  database that had run the earlier `0002` was brought level by applying the difference
+  by hand as the owner (the `users` revoke, the trigger function and its four triggers).
+- **Review: the boot assertion probes every privilege kind, per table and per column.**
+  It had read column-level grants for `UPDATE` only, so `GRANT INSERT (...)` on
+  `user_academy_roles` passed.
+- **Review: a role the application role could `SET ROLE` to is a refusal.** Membership
+  without inheritance is invisible to `has_*_privilege` until the role is assumed.
+  Numbers after the review: unit 150 passed (9 files), integration 67 passed (7 files).
+- **Review, left open on purpose.** The boot assertion does not look at `WITH GRANT
+  OPTION`, `CREATE` on the schema, or function and sequence privileges: none lets the
+  role touch an existing row it could not already touch. The trigger's refusal
+  (SQLSTATE 23000) has no HTTP mapping because no route can reach it; whoever builds the
+  void endpoint maps it. And because `PRIVILEGE_MATRIX` restates the grants, a migration
+  that widens a grant on a matrix table ships after the API version that allows it.
 
 ---
 

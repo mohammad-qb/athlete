@@ -7,7 +7,7 @@ import type {
 } from '@athlete/contracts';
 import { SessionsRepository, type ParticipantRow, type SessionRow } from './sessions.repository';
 import { TeamsRepository } from '../teams/teams.repository';
-import { PolicyService } from '../../common/authz/policy.service';
+import { assertCan } from '../../common/authz/assert-can';
 import { requestContext } from '../../common/tenancy/request-context';
 
 @Injectable()
@@ -15,11 +15,17 @@ export class SessionsService {
   constructor(
     private readonly repository: SessionsRepository,
     private readonly teams: TeamsRepository,
-    private readonly policies: PolicyService,
   ) {}
 
   async createSession(input: CreateSessionRequest): Promise<SessionResponse> {
-    const team = await this.teams.findTeam(input.teamId);
+    // A create has no existing row for a filter to exclude, so the row about to be
+    // written is checked instead: a coach schedules sessions for their own teams only.
+    assertCan('create', 'trainingSessions', { teamId: input.teamId });
+
+    const team = await this.teams.findTeam(
+      input.teamId,
+      this.teams.accessFilter('read', 'teams'),
+    );
     if (!team) throw new NotFoundException(`Team ${input.teamId} not found`);
     const row = await this.repository.createSession({
       teamId: input.teamId,
@@ -41,18 +47,21 @@ export class SessionsService {
     sessionId: string,
     input: RecordAttendanceRequest,
   ): Promise<ParticipationResponse[]> {
-    const session = await this.repository.findSession(sessionId);
-    if (!session) throw new NotFoundException(`Session ${sessionId} not found`);
+    const session = await this.readableSession(sessionId);
 
-    await this.policies.assertCanRecordAttendanceForTeam(session.teamId);
+    // The register rows about to be written carry the session's team as their
+    // `teamIdAtTime`, and that is the field the rule conditions on.
+    assertCan('create', 'sessionParticipants', { teamIdAtTime: session.teamId });
 
     const { userId } = requestContext.require();
 
+    const memberships = this.teams.accessFilter('read', 'teamMemberships');
     for (const entry of input.entries) {
       const wasMember = await this.teams.wasMemberAt(
         session.teamId,
         entry.athleteId,
         session.startsAt,
+        memberships,
       );
       if (!wasMember) {
         throw new BadRequestException(
@@ -76,15 +85,31 @@ export class SessionsService {
     // Replayed submissions insert nothing; return the stored register either way so the
     // client converges on server state rather than guessing.
     if (rows.length === 0) {
-      return (await this.repository.participantsFor(sessionId)).map(toParticipationResponse);
+      return this.storedRegister(sessionId);
     }
     return rows.map(toParticipationResponse);
   }
 
   async register(sessionId: string): Promise<ParticipationResponse[]> {
-    const session = await this.repository.findSession(sessionId);
+    await this.readableSession(sessionId);
+    return this.storedRegister(sessionId);
+  }
+
+  /** A session outside the principal's scope is indistinguishable from one that is not there. */
+  private async readableSession(sessionId: string): Promise<SessionRow> {
+    const session = await this.repository.findSession(
+      sessionId,
+      this.repository.accessFilter('read', 'trainingSessions'),
+    );
     if (!session) throw new NotFoundException(`Session ${sessionId} not found`);
-    const rows = await this.repository.participantsFor(sessionId);
+    return session;
+  }
+
+  private async storedRegister(sessionId: string): Promise<ParticipationResponse[]> {
+    const rows = await this.repository.participantsFor(
+      sessionId,
+      this.repository.accessFilter('read', 'sessionParticipants'),
+    );
     return rows.map(toParticipationResponse);
   }
 }

@@ -48,8 +48,8 @@ describe('principal scope resolution', () => {
   beforeAll(async () => {
     db = await startTestDatabase();
     database = new DatabaseService(db.url, 2);
-    academy = await seedAcademy(db.pool, 'Scope Academy');
-    other = await seedAcademy(db.pool, 'Other Academy');
+    academy = await seedAcademy(db, 'Scope Academy');
+    other = await seedAcademy(db, 'Other Academy');
 
     current = await createTeam(db.pool, academy.academyId, 'Current Team');
     former = await createTeam(db.pool, academy.academyId, 'Former Team');

@@ -23,8 +23,8 @@ describe('tenant isolation', () => {
 
   beforeAll(async () => {
     db = await startTestDatabase();
-    academyA = await seedAcademy(db.pool, 'Dubai Falcons Academy');
-    academyB = await seedAcademy(db.pool, 'Abu Dhabi Oryx Academy');
+    academyA = await seedAcademy(db, 'Dubai Falcons Academy');
+    academyB = await seedAcademy(db, 'Abu Dhabi Oryx Academy');
     await createAthlete(db.pool, academyA.academyId, 'Amal', 'Falcon');
     await createAthlete(db.pool, academyB.academyId, 'Badr', 'Oryx');
   }, 180_000);
@@ -103,7 +103,8 @@ describe('tenant isolation', () => {
     // A person may work at several academies. Login needs that list before any tenant
     // context exists, so exactly one SECURITY DEFINER function provides it -- returning
     // role assignments only, never domain data.
-    const sharedUser = await db.pool.query(
+    // Provisioned as the platform: the application role cannot create users or grants.
+    const sharedUser = await db.adminPool.query(
       `insert into users (email, password_hash, full_name)
        values ($1, 'x', 'Shared Coach') returning id`,
       [`shared+${randomUUID()}@example.test`],
@@ -111,11 +112,9 @@ describe('tenant isolation', () => {
     const userId = sharedUser.rows[0].id as string;
 
     for (const academy of [academyA, academyB]) {
-      await asAcademy(db.pool, academy.academyId, (client) =>
-        client.query(
-          `insert into user_academy_roles (academy_id, user_id, role) values ($1, $2, 'coach')`,
-          [academy.academyId, userId],
-        ),
+      await db.adminPool.query(
+        `insert into user_academy_roles (academy_id, user_id, role) values ($1, $2, 'coach')`,
+        [academy.academyId, userId],
       );
     }
 

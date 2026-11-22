@@ -4,10 +4,15 @@ import { config as baseConfig } from './base.js';
 /**
  * Type-aware configuration for the TypeScript packages (apps/api, packages/*).
  *
- * WHY THIS EXISTS, concretely. Authorization in this codebase is asserted by calls
+ * WHY THIS EXISTS, concretely. Authorization in this codebase WAS asserted by calls
  * that return a promise and are awaited for effect, not for value:
  *
  *     await this.policies.assertCanAccessAthlete(id);
+ *
+ * (That call is gone: resource checks are now a synchronous `assertCan` and a required
+ * repository filter, neither of which has a promise to drop. The rule stays, because
+ * the shape -- an awaited call made only for its side effect -- is how the next such
+ * check will be written.)
  *
  * Drop the `await` and the expression still type-checks, the request still succeeds,
  * and the check is silently skipped -- there is no value for a test to assert on and no

@@ -181,7 +181,19 @@ Three properties to look for, all enforced below the application:
    the **same team**, because an athlete may legitimately be in a U17 squad and the first
    team at once. A blanket "one team at a time" constraint would look stricter and be wrong.
 3. `ON DELETE RESTRICT` on recorded facts. A register that can be emptied by deleting a
-   parent row is not a historical record.
+   parent row is not a historical record. (Until `0002_grants.sql` this was claimed and
+   not true: `training_sessions` and `teams` cascaded onto the register and the
+   membership history. `academy_id → academies` still cascades, deliberately — removing a
+   tenant removes the tenant.)
+4. A privilege matrix, not one role with full DML. `athlete_app` has **no `DELETE` on
+   anything**, column-level `UPDATE` on recorded facts (the voiding columns only — a
+   wrong fact is voided and replaced, never edited), `SELECT` only on academies and
+   role grants, nothing at all on `users` (it holds credentials and has no tenant
+   policy), and nothing on a future table until a migration grants it. A trigger makes
+   `valid_to` and the voiding columns final once set, so a closed period cannot be
+   reopened and a void cannot be undone by that role. The API checks at boot that it is
+   connected as that role, holding no more than this matrix, and refuses to start
+   otherwise.
 
 ---
 
@@ -321,13 +333,13 @@ Run on macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2, `postgres:17-alpine`:
 ```
 pnpm run typecheck                          ✓ no errors (5 tasks)
 pnpm run lint                               ✓ no errors (6 tasks, type-aware)
-pnpm run lint:boundaries                    ✓ no violations (56 modules, 112 dependencies)
+pnpm run lint:boundaries                    ✓ no violations (58 modules, 123 dependencies)
 pnpm run build                              ✓ 3 tasks
-test (unit)                                 ✓ 129 passed (8 files)
-test:integration (real Postgres)            ✓ 26 passed  (5 files)
+test (unit)                                 ✓ 150 passed (9 files)
+test:integration (real Postgres)            ✓ 67 passed  (7 files)
 docker build -f apps/api/Dockerfile         ✓ image builds
-docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql
-./scripts/smoke.sh (containerised stack)    ✓ 16/16 checks passed
+docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql
+./scripts/smoke.sh (containerised stack)    ✓ 18/18 checks passed
 ```
 
 The smoke run, verbatim — note check 4, which is the same request as check 3 with a
@@ -341,6 +353,10 @@ Tenant isolation over HTTP (identical request, different academy)
   PASS  academy A sees its athletes                  200
   PASS  academy B sees an empty list                 []
   PASS  A's athlete is invisible to B                404
+
+Resource scoping inside one academy (a coach of team A; team B exists beside it)
+  PASS  coach lists only their team's athletes       44444444-4444-4444-4444-444444444444
+  PASS  coach is refused team B's roster             403
 Optimistic concurrency
   PASS  read returns an ETag                         integer
   PASS  write with current ETag wins                 200
@@ -401,13 +417,16 @@ Each one exists to make a specific claim falsifiable.
 |---|---|---|
 | `tenancy.isolation.integration` | Connects as a **`NOBYPASSRLS` non-owner role**, then: an academy sees only its own athletes; no tenant context returns **zero** rows (fails closed); inserting into another academy is refused; **referencing** another academy's team is refused by a composite FK; cross-tenant role lookup exists only behind one audited `SECURITY DEFINER` function | "prevent unauthorized access between academies" |
 | `temporal.membership.integration` | Overlapping periods in the same team rejected; concurrent membership of *different* teams allowed; back-to-back periods permitted (`[)` bounds); inverted periods rejected; "who was on this team in March" answered from the period | "maintaining historical records" |
-| `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted; a replayed offline submission inserts nothing | "maintaining historical records when athletes change teams" |
+| `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted — by the application role (no privilege) or by the owner (`RESTRICT`); a replayed offline submission inserts nothing | "maintaining historical records when athletes change teams" |
 | `concurrency.optimistic-lock.integration` | Two writers hold version 0; the first wins, the second affects **zero rows** → 409, and the first writer's change survives; no row lock is held across user think-time | "two users update the same record simultaneously" |
 | `authz.route-coverage` | Walks the real module graph and fails if **any** route lacks `@Permission` or `@Public`; every declared `(action, subject)` is in the shared vocabulary and every subject is claimed by a route or explicitly reserved; the public allowlist is asserted explicitly; the committed [route manifest](docs/reference/route-manifest.md), with paths as served under `/api/v1`, must match the code | "secure access based on user roles and responsibilities" |
 | `authz.ability.unit` | One CASL ability definition is the whole policy: grants per role; the operations each route demanded before are held by exactly the roles those routes listed; the coarse (guard) and scoped (query) modes agree on which operations exist, and scoped never grants what the guard refuses; a coach with no active assignment gets **no rule**, not a rule over an empty list | "secure access based on user roles and responsibilities" |
 | `authz.guard.unit` | The guard refuses an undeclared route even for a platform administrator, answers 401 without a principal, and decides from the ability rather than a role list on the route | "secure access based on user roles and responsibilities" |
 | `authz.to-sql-where.unit` | A rule condition compiles to the SQL it says (asserted on rendered text and bound parameters), agrees with the in-memory matcher on `NULL` — including ordering, where CASL coerces null to 0, cross-checked against the real matcher — and **throws** on an unknown operator, an unmapped field, a relation or a boolean ordering operand — a restriction is never silently dropped | — |
 | `authz.accessible-by.unit` | The query filter derived from an ability is unrestricted for an administrator, a predicate for a coach, and a **403** when nothing grants the action — never an unfiltered query | — |
+| `authz.resource-scoping.integration` | Inside one academy a coach lists only their team's athletes, is refused another team's athlete, roster and session, and **a coach whose assignment closed is refused the roster they could read last month** — same data, only the instant differs; an administrator sees the whole academy; nothing crosses academies. A last block calls the repositories directly with a row outside the filter, so a repository that accepts the predicate and ignores it fails | "secure access based on user roles and responsibilities" |
+| `privileges.matrix.integration` | As the application role, inside its own tenant: `DELETE` on a recorded fact is refused; so is `UPDATE` of anything but the voiding columns; a session with a register cannot be deleted **even by the owner** (`RESTRICT`, where it used to cascade); a role grant, a user or an academy cannot be created, and `users` cannot be read; a table added later is unreachable without an explicit grant; correction works as void + re-insert; a voided membership grants no access; a closed period cannot be reopened and a void cannot be undone or re-attributed, while the owner can still repair a row; the boot assertion accepts `athlete_app`, refuses the owner, and refuses a non-owner role holding one grant more than the matrix — table-level or on single columns, of any privilege kind (`INSERT (…)` on role grants, `REFERENCES`, `TRIGGER`, `MAINTAIN` included) | "prevent unauthorized access"; "maintaining historical records" |
+| `database-privileges.unit` | The boot-time refusal: each of superuser, `BYPASSRLS`, table ownership, a role reachable only by `SET ROLE`, and any privilege outside the matrix (table-level or column-level, of any kind, on any of its tables) is reported, all at once, and an unmigrated database is a refusal rather than a clean bill | — |
 | `authz.principal-scope.integration` | A coach's scope follows the periods in the data at one instant: a closed assignment contributes no team, an athlete who left drops out, the period is half-open, the instant is the database transaction's `now()` rather than the host clock, and the same user's assignment in another academy is unreachable | "secure access based on user roles and responsibilities" |
 | `optimistic-concurrency.unit` | `If-Match`/`ETag` parsing, including malformed and weak validators; a stale write is a 409 carrying the version the caller held | "two users update the same record simultaneously" |
 | `api-error.unit` | Every error type maps to the status and log severity the contract promises, the type list is exhaustive (adding one without a status fails here), and `toJSON` cannot serialise `cause` | — |
