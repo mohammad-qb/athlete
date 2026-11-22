@@ -16,6 +16,8 @@ module "api" {
   migrate_identity_id = local.base.migrate_identity_id
   api_secrets         = local.base.api_secrets
   migrate_secrets     = local.base.migrate_secrets
+  app_base_url        = local.base.app_base_url
+  trusted_proxies     = local.base.auth_trusted_proxies
 
   min_replicas = local.api_min_replicas
   max_replicas = local.api_max_replicas

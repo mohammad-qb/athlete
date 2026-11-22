@@ -51,10 +51,16 @@ context returns *nothing* — it does not return *everything*.
    reading across tenants. The API asserts it too, at boot, and refuses to start as
    anything else — because the local compose stack was later found doing the same
    thing over HTTP.
-2. **The login bootstrap problem.** Authentication must find a user before any academy
-   is chosen. Rather than weaken RLS, exactly one `SECURITY DEFINER` function with a
-   pinned `search_path` provides that lookup, returning role assignments only — never
-   domain data. One auditable exception beats a general hole.
+2. **The login bootstrap problem.** Authentication must find a user's academies before
+   any academy is chosen. Rather than weaken RLS for the application role, exactly one
+   `SECURITY DEFINER` function with a pinned `search_path` provides that lookup,
+   returning role assignments and academy names only — never domain data. One auditable
+   exception beats a general hole. The first detail bites here: the function reads as
+   the *owner*, which `FORCE ROW LEVEL SECURITY` confines too, so it returned nothing
+   unless the owner was a superuser. The owner therefore holds a `SELECT` policy of its
+   own on the two tables the function reads (`0003_auth.sql`,
+   [ADR 0006](./adr/0006-cookie-sessions-and-the-auth-role.md)), and a suite that
+   migrates as a non-superuser asserts it.
 
 ### b. Composite foreign keys — the part RLS does not cover
 
@@ -189,7 +195,7 @@ every future table; `0002` revokes both and grants back table by table.
 | `team_memberships` | `SELECT`, `INSERT`, `UPDATE (valid_to, voided_at, voided_by)` |
 | `team_coach_assignments` | `SELECT`, `INSERT`, `UPDATE (valid_to)` |
 | `academies`, `user_academy_roles` | `SELECT` |
-| `users`, `_migrations`, any future table | nothing |
+| `users`, `auth_sessions`, `auth_accounts`, `auth_verifications`, `_migrations`, any future table | nothing |
 
 - **No `DELETE` on any table.** Nothing in the API deletes.
 - **`status` on a register entry is not updatable.** Editing a status in place is
@@ -200,9 +206,14 @@ every future table; `0002` revokes both and grants back table by table.
   application role could reopen a closed coach assignment — restoring that coach's
   access — or clear `voided_at` to bring a voided fact back. The owner is exempt, so
   the platform can still repair a row under a different identity.
-- **`users` gets nothing** because it holds `password_hash` and, having no
-  `academy_id`, has no RLS policy: `SELECT` on it would expose every tenant's
-  credentials to any statement running as the application role.
+- **`users` and the three `auth_*` tables get nothing.** They hold identity, password
+  hashes and live session tokens, and none has an `academy_id`, so none has an RLS
+  policy: `SELECT` on them would expose every tenant's credentials to any statement
+  running as the application role. They belong to a second role, `athlete_auth`, which
+  better-auth alone connects as: `SELECT, INSERT, UPDATE` on `users`, full DML on the
+  `auth_*` tables, and nothing on any tenant-owned table
+  ([ADR 0006](./adr/0006-cookie-sessions-and-the-auth-role.md)). The password hash
+  itself is in `auth_accounts`; `users.password_hash` is gone.
 
 Tested in `privileges.matrix.integration.spec.ts`, inside the tenant, as the
 application role; and checked by the API at boot, which refuses to start holding more

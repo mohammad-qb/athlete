@@ -10,7 +10,8 @@
     "start:dev": "ts-node-dev --respawn src/main.ts",
     "test": "vitest run --dir test unit route-coverage validation.http",
     "test:integration": "vitest run --dir test integration",
-    "migrate": "ts-node src/db/migrate.ts"
+    "migrate": "ts-node src/db/migrate.ts",
+    "user:create": "ts-node src/cli/create-user.ts"
   },
   "dependencies": {
     "@athlete/config": "workspace:*",
@@ -19,6 +20,7 @@
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",
+    "better-auth": "1.7.27",
     "drizzle-orm": "^0.44.5",
     "pg": "^8.16.3",
     "reflect-metadata": "^0.2.2",

@@ -1,10 +1,43 @@
 import type { Role } from '@athlete/contracts';
 
-/** Who is calling, as verified from the session token. Nothing here needs the database. */
+/**
+ * Who is signed in, as resolved from the session cookie -- and nothing about what they
+ * may do. A person with an account and no role in any academy is still an identity.
+ */
+export interface Identity {
+  userId: string;
+  email: string;
+  name: string;
+  /** The session row this request arrived on; the handle for switching academy. */
+  sessionId: string;
+}
+
+/** One academy the user belongs to, with every role they hold there. */
+export interface AcademyMembership {
+  id: string;
+  name: string;
+  roles: Role[];
+}
+
+/**
+ * Who is calling AND in which academy: the identity acting in its active academy, with
+ * the roles held there. This is what the policy is evaluated for. The roles are read
+ * from the database on every request; they are never stored in the session.
+ */
 export interface Principal {
   userId: string;
   academyId: string;
   roles: Role[];
+}
+
+/** What `AuthenticationGuard` leaves on the request for everything after it. */
+export interface AuthenticatedRequest {
+  /** Present when the cookie resolved to a live session. */
+  identity?: Identity;
+  /** Every academy the identity belongs to. Present whenever `identity` is. */
+  memberships?: AcademyMembership[];
+  /** Present when the identity holds a role in at least one academy. */
+  principal?: Principal;
 }
 
 /**

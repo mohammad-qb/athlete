@@ -10,6 +10,12 @@ API surface or to what a route demands is always a reviewed diff here.
 
 Who holds each `(action, subject)` pair is decided in one place:
 [`apps/api/src/common/authz/ability.ts`](../../apps/api/src/common/authz/ability.ts).
+`_public_` admits anyone; `_authenticated_` admits any signed-in user and is for
+routes about the caller rather than about a resource.
+
+better-auth's own routes under `/api/auth/*` (sign-in, sign-out, change password) are
+mounted beneath Nest and are not listed: they are the library's API, authenticated
+and origin-checked by the library. See `docs/adr/0006-cookie-sessions-and-the-auth-role.md`.
 
 "Validates" lists the parts of the request the route declares a schema for with
 `@Validate`. A handler can only read a part that is listed: the `@Valid*` parameter
@@ -28,6 +34,8 @@ UPDATE_ROUTE_MANIFEST=1 pnpm --filter @athlete/api run test
 | GET | `/api/v1/athletes/:id` | `AthletesController.getById` | read | athletes | params |
 | PATCH | `/api/v1/athletes/:id` | `AthletesController.update` | update | athletes | params, body |
 | GET | `/api/v1/health` | `HealthController.live` | _public_ | _public_ | — |
+| GET | `/api/v1/me` | `MeController.read` | _authenticated_ | _authenticated_ | — |
+| POST | `/api/v1/me/active-academy` | `MeController.switchAcademy` | _authenticated_ | _authenticated_ | body |
 | POST | `/api/v1/sessions` | `SessionsController.create` | create | trainingSessions | body |
 | GET | `/api/v1/sessions/:id/attendance` | `SessionsController.register` | read | sessionParticipants | params |
 | POST | `/api/v1/sessions/:id/attendance` | `SessionsController.recordAttendance` | create | sessionParticipants | params, body |

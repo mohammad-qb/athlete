@@ -106,8 +106,8 @@ identities can reach**. That is why those are narrow too, and why there are two:
 
 | Identity | Can read | Cannot read |
 |---|---|---|
-| `api` | `database-url` (the non-owner `athlete_app` role), `session-secret`, `appinsights-connection-string` | the owner connection string, the admin password, the backup key |
-| `migrate` | `database-migration-url` (owner), `app-role-password` | the session secret, the admin password secret, the backup key |
+| `api` | `database-url` (the non-owner `athlete_app` role), `auth-database-url` (the `athlete_auth` role: users, sessions, password hashes), `session-secret`, `appinsights-connection-string` | the owner connection string, the admin password, the backup key |
+| `migrate` | `database-migration-url` (owner), `app-role-password`, `auth-role-password` | the session secret, the admin password secret, the backup key |
 
 Each is `Key Vault Secrets User` on **individual secrets**, not on the vault. The
 `migrate` identity does hold the database owner credential, and the deploy identity can
@@ -230,6 +230,9 @@ every resource sharing that number in the same apply.
 - `session`: apply, then restart the revision (invalidates every session).
 - `app_role`: apply, run the migration job (it sets the role's password from
   `app-role-password`), then restart the revision.
+- `auth_role`: the same three steps as `app_role`; the migration job sets the
+  `athlete_auth` password from `auth-role-password`. Sessions survive: they are rows,
+  and only the connection credential changed.
 - `postgres_admin`: apply. The server and both secrets holding the password change together.
 
 A hazard worth knowing: because the values are regenerated on every run and only *sent*

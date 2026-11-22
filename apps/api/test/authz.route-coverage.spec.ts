@@ -9,6 +9,8 @@ import { Action, Subject } from '@athlete/contracts';
 import { describe, expect, it } from 'vitest';
 import { API_GLOBAL_PREFIX, AppModule } from '../src/app.module';
 import {
+  Authenticated,
+  AUTHENTICATED_METADATA,
   Permission,
   PERMISSION_METADATA,
   Public,
@@ -61,6 +63,8 @@ interface Route {
   path: string;
   permission: PermissionSpec | undefined;
   isPublic: boolean;
+  /** `@Authenticated`: any signed-in identity, no `(action, subject)`. */
+  isAuthenticated: boolean;
   /** The `@Validate` schemas, as the interceptor resolves them. */
   validation: ValidationSpec;
   /** Slots the handler reads through `@ValidBody/@ValidParams/@ValidQuery`. */
@@ -145,6 +149,12 @@ function collectRoutes(root: Ctor): Route[] {
         isPublic: Boolean(
           reflector.getAllAndOverride<boolean | undefined>(PUBLIC_METADATA, [handler, controller]),
         ),
+        isAuthenticated: Boolean(
+          reflector.getAllAndOverride<boolean | undefined>(AUTHENTICATED_METADATA, [
+            handler,
+            controller,
+          ]),
+        ),
         validation:
           reflector.getAllAndOverride<ValidationSpec | undefined>(VALIDATE_METADATA, [
             handler,
@@ -174,8 +184,13 @@ function renderManifest(routes: Route[]): string {
   const rows = [...routes]
     .sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method))
     .map((route) => {
-      const action = route.permission?.action ?? (route.isPublic ? '_public_' : '**undeclared**');
-      const subject = route.permission?.subject ?? (route.isPublic ? '_public_' : '**undeclared**');
+      const kind = route.isPublic
+        ? '_public_'
+        : route.isAuthenticated
+          ? '_authenticated_'
+          : '**undeclared**';
+      const action = route.permission?.action ?? kind;
+      const subject = route.permission?.subject ?? kind;
       const validates = VALIDATION_SLOTS.filter((slot) => route.validation[slot]).join(', ') || '—';
       return `| ${route.method} | \`${route.path}\` | \`${route.name}\` | ${action} | ${subject} | ${validates} |`;
     });
@@ -193,6 +208,12 @@ function renderManifest(routes: Route[]): string {
     '',
     'Who holds each `(action, subject)` pair is decided in one place:',
     '[`apps/api/src/common/authz/ability.ts`](../../apps/api/src/common/authz/ability.ts).',
+    '`_public_` admits anyone; `_authenticated_` admits any signed-in user and is for',
+    'routes about the caller rather than about a resource.',
+    '',
+    'better-auth\'s own routes under `/api/auth/*` (sign-in, sign-out, change password) are',
+    'mounted beneath Nest and are not listed: they are the library\'s API, authenticated',
+    'and origin-checked by the library. See `docs/adr/0006-cookie-sessions-and-the-auth-role.md`.',
     '',
     '"Validates" lists the parts of the request the route declares a schema for with',
     '`@Validate`. A handler can only read a part that is listed: the `@Valid*` parameter',
@@ -218,21 +239,25 @@ describe('authorization route coverage', () => {
     expect(routes.length).toBeGreaterThan(0);
   });
 
-  it('every route declares either @Permission or @Public', () => {
+  /** How many of @Permission, @Authenticated and @Public the route carries. The guard admits exactly one. */
+  const declarations = (route: Route) =>
+    [route.permission !== undefined, route.isAuthenticated, route.isPublic].filter(Boolean).length;
+
+  it('every route declares @Permission, @Authenticated or @Public', () => {
     const undeclared = routes
-      .filter((route) => route.permission === undefined && !route.isPublic)
+      .filter((route) => declarations(route) === 0)
       .map((route) => `${route.method} ${route.path} (${route.name})`);
 
     expect(
       undeclared,
       `Routes with no authorization decision:\n  ${undeclared.join('\n  ')}\n` +
-        'Add @Permission({ action, subject }) or @Public().',
+        'Add @Permission({ action, subject }), @Authenticated() or @Public().',
     ).toEqual([]);
   });
 
-  it('no route declares both: a public route with a permission is a contradiction', () => {
-    const both = routes.filter((route) => route.permission && route.isPublic).map((r) => r.name);
-    expect(both).toEqual([]);
+  it('no route declares more than one: two declarations disagree about who may call it', () => {
+    const several = routes.filter((route) => declarations(route) > 1).map((r) => r.name);
+    expect(several).toEqual([]);
   });
 
   it('reads controller-level metadata as the guard does', () => {
@@ -257,11 +282,12 @@ describe('authorization route coverage', () => {
 
     const found = Object.fromEntries(collectRoutes(FixtureModule).map((route) => [route.name, route]));
 
-    // The guard would let this through as public, so it must surface as the contradiction.
+    // The guard refuses this route at runtime; here it must surface as the contradiction.
     expect(found['OpenController.contradictory']).toMatchObject({
       isPublic: true,
       permission: { action: 'read', subject: 'athletes' },
     });
+    expect(declarations(found['OpenController.contradictory'] as Route)).toBe(2);
     expect(found['GatedController.inherited']).toMatchObject({
       isPublic: false,
       permission: { action: 'read', subject: 'teams' },
@@ -304,6 +330,34 @@ describe('authorization route coverage', () => {
     // allowlist is asserted explicitly: adding to it requires editing this test.
     const publicRoutes = routes.filter((route) => route.isPublic).map((route) => route.name);
     expect(publicRoutes.sort()).toEqual(['HealthController.live']);
+  });
+
+  it('keeps the set of @Authenticated routes small and intentional', () => {
+    // @Authenticated skips the policy altogether, so it is for routes about the caller
+    // and nothing else. A route that touches a resource names a permission.
+    const authenticated = routes.filter((route) => route.isAuthenticated).map((route) => route.name);
+    expect(authenticated.sort()).toEqual(['MeController.read', 'MeController.switchAcademy']);
+  });
+
+  it('sees @Authenticated on a handler and on a controller', () => {
+    @Authenticated()
+    @Controller('self')
+    class SelfController {
+      @Get()
+      inherited(): void {}
+    }
+    @Controller('mixed')
+    class MixedController {
+      @Get()
+      @Authenticated()
+      own(): void {}
+    }
+    @Module({ controllers: [SelfController, MixedController] })
+    class FixtureModule {}
+
+    const found = Object.fromEntries(collectRoutes(FixtureModule).map((route) => [route.name, route]));
+    expect(found['SelfController.inherited']).toMatchObject({ isAuthenticated: true, isPublic: false });
+    expect(found['MixedController.own']).toMatchObject({ isAuthenticated: true, permission: undefined });
   });
 
   it('docs/reference/route-manifest.md matches the routes in the code', () => {

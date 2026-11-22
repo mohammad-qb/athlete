@@ -49,7 +49,7 @@ flowchart TB
     end
 
     subgraph api["apps/api — ONE deployable"]
-        mw["AuthenticationGuard<br/>verify token → principal"]
+        mw["AuthenticationGuard<br/>session cookie → identity + principal"]
         guard["AuthorizationGuard<br/>DENY BY DEFAULT<br/>coarse ability: may this role ever?"]
         val["ValidationInterceptor<br/>declared schemas or refusal"]
         itx["TenantTransactionInterceptor<br/>BEGIN + set_config(academy_id)<br/>scoped ability: to which rows?"]
@@ -128,7 +128,7 @@ erDiagram
     USERS {
         uuid id PK
         text email UK "NOT tenant-scoped: one person, several academies"
-        text password_hash
+        text full_name "credentials live in auth_accounts, out of the API role's reach"
     }
     USER_ACADEMY_ROLES {
         uuid academy_id FK
@@ -225,10 +225,10 @@ sequenceDiagram
     participant R as Repository
     participant DB as Postgres
 
-    C->>A: PATCH /api/v1/athletes/:id<br/>Authorization + If-Match "3"
-    A->>A: verify token → principal{userId, academyId, roles}<br/>attaches or not, never refuses
+    C->>A: PATCH /api/v1/athletes/:id<br/>session cookie + If-Match "3"
+    A->>A: session row → identity; roles read now → principal{userId, academyId, roles}<br/>attaches or not, never refuses
     A->>G: next()
-    G->>G: @Permission or @Public declared?<br/>NO → 403 (deny by default)
+    G->>G: exactly one of @Permission, @Authenticated, @Public declared?<br/>NO → 403 (deny by default)
     G->>G: COARSE ability: can(update, athletes)?<br/>no conditions, no database · NO → 403
     G->>V: next()
     V->>V: parse params + body with the route's declared schemas<br/>unknown or empty → 400, no transaction opened
@@ -357,13 +357,43 @@ beside it, one box.
 ```bash
 docker compose up -d --build        # postgres + api
 docker compose run --rm migrate     # migrations as a SEPARATE step, as in CI
-./scripts/smoke.sh                  # end-to-end checks over HTTP
+./scripts/smoke.sh                  # end-to-end checks over HTTP (seeds what it needs)
 
 # if port 5432 or 3000 is already taken on your machine:
 POSTGRES_PORT=55432 API_PORT=3100 docker compose up -d --build
 POSTGRES_PORT=55432 docker compose run --rm migrate
 API_PORT=3100 ./scripts/smoke.sh
 ```
+
+### Sign in
+
+There is no sign-up: an account is created by an operator, with the owner connection,
+the same way a migration is run. [`scripts/seed-dev.sh`](./scripts/seed-dev.sh) does
+that for a local stack — the demo academies, teams and athletes, plus an administrator
+and a coach of Alpha Academy:
+
+```bash
+./scripts/seed-dev.sh               # admin@alpha.test, coach@alpha.test
+                                    # password: $SEED_PASSWORD, default athlete-dev-password
+
+# sign in: the session comes back as an httpOnly cookie
+curl -c jar -H 'Content-Type: application/json' -H 'Origin: http://localhost:3000' \
+  -d '{"email":"coach@alpha.test","password":"athlete-dev-password"}' \
+  http://localhost:3000/api/auth/sign-in/email
+
+curl -b jar http://localhost:3000/api/v1/me         # who am I, where, and what may I attempt
+curl -b jar http://localhost:3000/api/v1/athletes   # the coach's own team, and only that
+
+# any other account: the operator CLI, password on stdin
+printf '%s' 'a-long-password' | docker compose run --rm -T migrate \
+  node dist/cli/create-user.js --email new@alpha.test --name 'New Person' \
+  --academy 11111111-1111-1111-1111-111111111111 --role coach
+```
+
+Sign-in, sign-out and change-password are better-auth's own routes under `/api/auth`;
+everything else is under `/api/v1`. Why sessions are rows, why better-auth has a
+database role of its own, and why the browser cannot choose its academy:
+[ADR 0006](./docs/adr/0006-cookie-sessions-and-the-auth-role.md).
 
 ### Verified state of this repository
 
@@ -372,24 +402,36 @@ Run on 22 November 2026, in this order, on macOS, Node 24.14.1, pnpm 11.21.0, Do
 stack was started on a fresh volume:
 
 ```
+pnpm install --frozen-lockfile              ✓ lockfile unchanged
 pnpm run typecheck                          ✓ no errors (5 tasks)
 pnpm run lint                               ✓ no errors (6 tasks, type-aware)
-pnpm run lint:boundaries                    ✓ no violations (59 modules, 127 dependencies)
+pnpm run lint:boundaries                    ✓ no violations (73 modules, 163 dependencies)
 pnpm run build                              ✓ 3 tasks
-test (unit + route coverage + HTTP)         ✓ 180 passed (11 files)
-test:integration (real Postgres)            ✓ 67 passed  (7 files)
+test (unit + route coverage + HTTP)         ✓ 235 passed (14 files)
+test:integration (real Postgres)            ✓ 107 passed (9 files)
 docker build -f apps/api/Dockerfile         ✓ image builds
-docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql
-./scripts/smoke.sh (containerised stack)    ✓ 26/26 checks passed
+docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql, 0003_auth.sql
+./scripts/smoke.sh (containerised stack)    ✓ 64/64 checks passed
 ```
 
-The smoke run, verbatim, from that fresh volume — note check 4, which is the same
-request as check 3 with a different academy's token:
+The smoke run, verbatim, from that fresh volume. Every request after the first block
+carries a session cookie obtained by signing in over HTTP; "academy B sees an empty
+list" is the same request as the line above it with another person's cookie:
 
 ```
+Signing in (a session row behind an httpOnly cookie)
+  PASS  wrong password is refused                    401
+  PASS  Alpha's administrator signs in               200
+  PASS  Beta's administrator signs in                200
+  PASS  the coach signs in                           200
+  PASS  the cookie is httpOnly                       1
+  PASS  a burst of sign-ins is rate limited          429
+  PASS  public sign-up is closed                     false
+
 Liveness and deny-by-default
   PASS  health is public                             200
-  PASS  no token is refused                          401
+  PASS  no cookie is refused                         401
+  PASS  a made-up cookie is refused                  401
 
 Tenant isolation over HTTP (identical request, different academy)
   PASS  academy A sees its athletes                  200
@@ -410,7 +452,7 @@ Error contract (one shape for every failure, not just a status code)
   PASS  conflict is typed CONFLICT                   CONFLICT
   PASS  conflict carries a stable code               stale_write
   PASS  a refusal is typed NOT_FOUND                 NOT_FOUND
-  PASS  no token is typed UNAUTHORIZED               UNAUTHORIZED
+  PASS  no cookie is typed UNAUTHORIZED              UNAUTHORIZED
 
 Validation (on by default; a 200 never means "nothing happened")
   PASS  malformed body is refused                    400
@@ -425,11 +467,50 @@ Validation (on by default; a 200 never means "nothing happened")
   PASS  a valid instant is accepted                  200
   PASS  unknown query parameter refused              400
 
+Who am I (GET /me: academies, and the coarse permissions of the active one)
+  PASS  /me needs a session                          401
+  PASS  /me names the signed-in user                 admin@alpha.test
+  PASS  ...their academies and roles                 Alpha Academy:academy_admin
+  PASS  ...and the active academy                    11111111-1111-1111-1111-111111111111
+  PASS  an admin may create athletes                 true
+  PASS  a coach may not                              false
+  PASS  a coach may record attendance                true
+  PASS  the wildcard is never reported               false
+
+Switching academy (the server chooses; the browser asks)
+  PASS  member of both signs in                      200
+  PASS  starts in the first academy by name          11111111-1111-1111-1111-111111111111
+  PASS  ...as a coach there                          false
+  PASS  switches to the other academy                200
+  PASS  the session moved                            22222222-2222-2222-2222-222222222222
+  PASS  ...with the roles held THERE                 true
+  PASS  ...and sees that academy's data              []
+  PASS  an academy that is not theirs is 403         403
+  PASS  ...typed not_a_member                        not_a_member
+  PASS  ...and the session did not move              11111111-1111-1111-1111-111111111111
+  PASS  update-session cannot choose a tenant        11111111-1111-1111-1111-111111111111
+
+Origin check (a cookie is ambient; a state-changing request must say where it is from)
+  PASS  POST from a foreign origin is 403            403
+  PASS  ...typed invalid_origin                      invalid_origin
+  PASS  ...and nothing was written                   0
+  PASS  a foreign-origin GET is not refused          200
+  PASS  the application's own origin passes          200
+  PASS  better-auth refuses it on its routes         403
+  PASS  ...and the session survived that             200
+
+Signing out (the row is deleted, so a copied cookie is worth nothing)
+  PASS  sign-out succeeds                            200
+  PASS  the old cookie is refused                    401
+  PASS  ...on every route                            401
+  PASS  another session is unaffected                200
+
 All smoke checks passed.
 ```
 
-The script is re-runnable: a second run against the same volume also passes 26/26, with
-a higher integer on the ETag line.
+The script is re-runnable: a second run against the same volume also passes 64/64, with
+a higher integer on the ETag line. It takes about half a minute, most of it spent
+waiting out the sign-in rate limit it then asserts.
 
 Every failure has the same shape, because a client should be able to write one error
 handler. The 409 body, which also has to tell the caller how to recover:
@@ -498,18 +579,22 @@ Each one exists to make a specific claim falsifiable.
 | `temporal.membership.integration` | Overlapping periods in the same team rejected; concurrent membership of *different* teams allowed; back-to-back periods permitted (`[)` bounds); inverted periods rejected; "who was on this team in March" answered from the period | "maintaining historical records" |
 | `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted — by the application role (no privilege) or by the owner (`RESTRICT`); a replayed offline submission inserts nothing | "maintaining historical records when athletes change teams" |
 | `concurrency.optimistic-lock.integration` | Two writers hold version 0; the first wins, the second affects **zero rows** → 409, and the first writer's change survives; no row lock is held across user think-time | "two users update the same record simultaneously" |
-| `authz.route-coverage` | Walks the real module graph and fails if **any** route lacks `@Permission` or `@Public`; every declared `(action, subject)` is in the shared vocabulary and every subject is claimed by a route or explicitly reserved; the public allowlist is asserted explicitly; the committed [route manifest](docs/reference/route-manifest.md), with paths as served under `/api/v1`, must match the code. The same walk covers validation: no handler binds `@Body`, `@Param` or `@Query`; every part of the request a handler reads, every body-taking method and every path parameter has a declared schema; and every declared schema refuses an unknown key | "secure access based on user roles and responsibilities" |
+| `authz.route-coverage` | Walks the real module graph and fails if **any** route does not carry exactly one of `@Permission`, `@Authenticated` and `@Public`; every declared `(action, subject)` is in the shared vocabulary and every subject is claimed by a route or explicitly reserved; the public allowlist is asserted explicitly; the committed [route manifest](docs/reference/route-manifest.md), with paths as served under `/api/v1`, must match the code. The same walk covers validation: no handler binds `@Body`, `@Param` or `@Query`; every part of the request a handler reads, every body-taking method and every path parameter has a declared schema; and every declared schema refuses an unknown key | "secure access based on user roles and responsibilities" |
 | `authz.ability.unit` | One CASL ability definition is the whole policy: grants per role; the operations each route demanded before are held by exactly the roles those routes listed; the coarse (guard) and scoped (query) modes agree on which operations exist, and scoped never grants what the guard refuses; a coach with no active assignment gets **no rule**, not a rule over an empty list | "secure access based on user roles and responsibilities" |
-| `authz.guard.unit` | The guard refuses an undeclared route even for a platform administrator, answers 401 without a principal, and decides from the ability rather than a role list on the route | "secure access based on user roles and responsibilities" |
+| `authz.guard.unit` | The guard refuses an undeclared route even for a platform administrator, **and one with two declarations**; answers 401 without a session; admits an account with no academy to an `@Authenticated` route and refuses it a `@Permission` one; and decides from the ability rather than a role list on the route | "secure access based on user roles and responsibilities" |
 | `authz.to-sql-where.unit` | A rule condition compiles to the SQL it says (asserted on rendered text and bound parameters), agrees with the in-memory matcher on `NULL` — including ordering, where CASL coerces null to 0, cross-checked against the real matcher — and **throws** on an unknown operator, an unmapped field, a relation or a boolean ordering operand — a restriction is never silently dropped | — |
 | `authz.accessible-by.unit` | The query filter derived from an ability is unrestricted for an administrator, a predicate for a coach, and a **403** when nothing grants the action — never an unfiltered query | — |
 | `authz.resource-scoping.integration` | Inside one academy a coach lists only their team's athletes, is refused another team's athlete, roster and session, and **a coach whose assignment closed is refused the roster they could read last month** — same data, only the instant differs; an administrator sees the whole academy; nothing crosses academies. A last block calls the repositories directly with a row outside the filter, so a repository that accepts the predicate and ignores it fails | "secure access based on user roles and responsibilities" |
-| `privileges.matrix.integration` | As the application role, inside its own tenant: `DELETE` on a recorded fact is refused; so is `UPDATE` of anything but the voiding columns; a session with a register cannot be deleted **even by the owner** (`RESTRICT`, where it used to cascade); a role grant, a user or an academy cannot be created, and `users` cannot be read; a table added later is unreachable without an explicit grant; correction works as void + re-insert; a voided membership grants no access; a closed period cannot be reopened and a void cannot be undone or re-attributed, while the owner can still repair a row; the boot assertion accepts `athlete_app`, refuses the owner, and refuses a non-owner role holding one grant more than the matrix — table-level or on single columns, of any privilege kind (`INSERT (…)` on role grants, `REFERENCES`, `TRIGGER`, `MAINTAIN` included) | "prevent unauthorized access"; "maintaining historical records" |
+| `privileges.matrix.integration` | As the application role, inside its own tenant: `DELETE` on a recorded fact is refused; so is `UPDATE` of anything but the voiding columns; a session with a register cannot be deleted **even by the owner** (`RESTRICT`, where it used to cascade); a role grant, a user or an academy cannot be created, and `users` cannot be read; a table added later is unreachable without an explicit grant; correction works as void + re-insert; a voided membership grants no access; a closed period cannot be reopened and a void cannot be undone or re-attributed, while the owner can still repair a row; the boot assertion accepts `athlete_app`, refuses the owner, and refuses a non-owner role holding one grant more than the matrix — table-level or on single columns, of any privilege kind (`INSERT (…)` on role grants, `REFERENCES`, `TRIGGER`, `MAINTAIN` included); the application role cannot read `users` or any `auth_*` table, and the auth role holds exactly identity and sessions — every privilege on every table in the schema is enumerated, and it cannot read an athlete, a role grant, or call the cross-tenant lookup | "prevent unauthorized access"; "maintaining historical records" |
 | `database-privileges.unit` | The boot-time refusal: each of superuser, `BYPASSRLS`, table ownership, a role reachable only by `SET ROLE`, and any privilege outside the matrix (table-level or column-level, of any kind, on any of its tables) is reported, all at once, and an unmigrated database is a refusal rather than a clean bill | — |
 | `authz.principal-scope.integration` | A coach's scope follows the periods in the data at one instant: a closed assignment contributes no team, an athlete who left drops out, the period is half-open, the instant is the database transaction's `now()` rather than the host clock, and the same user's assignment in another academy is unreachable | "secure access based on user roles and responsibilities" |
 | `validation.http` | Over real HTTP against a running Nest application: the handler receives the schema's **parsed output** (a coerced number, a default), not the raw request; an invalid or unknown field is a 400 typed `VALIDATION` naming it by dot path, with params, query and body reported together; and **a route that reads input without declaring a schema is refused** (500, reason in the log only) rather than handed the raw body | — |
 | `contracts.requests.unit` | A request schema never turns a mistake into a successful no-op: a PATCH with a misspelled field, or with no field, is refused where it used to validate to `{}` and bump the version; every request schema, nested entries included, refuses unknown keys; `?at` must be an ISO-8601 instant with an offset | "two users update the same record simultaneously" |
 | `optimistic-concurrency.unit` | `If-Match`/`ETag` parsing, including malformed and weak validators; a stale write is a 409 carrying the version the caller held | "two users update the same record simultaneously" |
+| `auth.session.integration` | With better-auth connected as its own role: an account made by the operator CLI signs in and gets an httpOnly, SameSite=Lax cookie that resolves to a session **row**; a wrong password and an unknown email are refused identically; sign-up is refused over HTTP and server-side; after sign-out, or a `DELETE` of the row, the same cookie resolves to nothing on the next request; the browser cannot set its academy through `update-session`; a session whose academy the user no longer belongs to falls back and is rewritten | "secure access based on user roles and responsibilities" |
+| `auth.owner.integration` | Migrated by an owner that is **not a superuser** (the production arrangement, and the one no other suite has): the operator CLI still creates accounts, and the cross-tenant lookup still returns a user's academies. It returned nothing before `0003`, which every superuser-migrated suite passed straight over | — |
+| `origin.guard.unit` | A state-changing request naming another origin (another scheme, port, subdomain, or `null`) is refused with `invalid_origin`; the application's origin and a request with no `Origin` pass; a GET is never refused | — |
+| `me.unit` | `/me` lists exactly the `(action, subject)` pairs the coarse ability grants, by asking it rather than restating it; never the `manage` wildcard; nothing without a principal; switching to an academy the user is not in is a 403 that writes nothing | — |
 | `api-error.unit` | Every error type maps to the status and log severity the contract promises, the type list is exhaustive (adding one without a status fails here), and `toJSON` cannot serialise `cause` | — |
 | `error-responder.unit` | One log line per failure at its own severity; `meta` logged for 5xx and withheld for 4xx; an unexpected error is redacted to `"Internal server error"` while the **whole cause chain** reaches the log, bounded and cycle-guarded; a 5xx `HttpException` is redacted the same way, payload and all, so choosing a status is not a claim the message is publishable; a 4xx `HttpException` publishes its message and **nothing else** of its payload; an `http-errors` 4xx keeps its status only when it marked itself exposable; a response already begun is closed rather than crashed | — |
 
@@ -581,15 +666,14 @@ Scope choices, each one a decision rather than an omission:
 - **Full CRUD across all entities.** Coaches, assessments and scheduling exist in the
   schema and the proposal, not in the API surface. Six shallow modules would prove less
   than one slice that carries every hard guarantee.
-- **Credential storage and session management.** Production uses
-  [better-auth](https://www.better-auth.com) with users and sessions in this same
-  Postgres: memory-hard password hashing, revocable database sessions, TOTP as a
-  plugin. It is named, with its trade-off (a young, fast-moving library, so the version
-  is pinned and upgrades are owned), in
-  [`docs/01-technology-stack.md` §7](./docs/01-technology-stack.md#7-authentication--better-auth-users-in-our-own-postgres).
-  The slice implements token *verification* so the authorization and tenancy paths are
-  exercised with a real principal. Hand-rolling credential storage to pad a case study
-  would be the wrong signal.
+- **Account management beyond signing in.** Sessions are real
+  ([better-auth](https://www.better-auth.com), httpOnly cookies, rows in this Postgres,
+  [ADR 0006](./docs/adr/0006-cookie-sessions-and-the-auth-role.md)), and that is where
+  it stops: accounts are created by an operator CLI, and there is no sign-up,
+  invitation, password reset by email, email verification or TOTP. Each needs outbound
+  email or a requirement that does not exist yet. Password hashing is the library's
+  default scrypt, not argon2id
+  ([`docs/01-technology-stack.md` §7](./docs/01-technology-stack.md#7-authentication--better-auth-users-in-our-own-postgres)).
 - **A void endpoint, and anything on assessments.** Voiding a wrongly recorded fact
   works and is tested at the database, as the application role; no route does it. The
   rule that a departed coach keeps the assessments they authored is designed and has
@@ -635,7 +719,7 @@ docs/                   the written proposal (A–E of the brief)
   adr/                  decision records for the hardening work
   reference/            the generated route manifest
   plans/                the phase-by-phase build record, deviations included
-scripts/                smoke check, demo seed, dev token minting
+scripts/                smoke check, demo data, dev accounts
 apps/api/Dockerfile     multi-stage, non-root, prod deps only
 docker-compose.yml      local dev AND the single-server deployment answer
 .dependency-cruiser.cjs architecture fitness rules

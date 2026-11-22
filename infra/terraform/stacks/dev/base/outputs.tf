@@ -49,6 +49,10 @@ output "api_secrets" {
       env_name            = "DATABASE_URL"
       key_vault_secret_id = azurerm_key_vault_secret.database_url.versionless_id
     }
+    "auth-database-url" = {
+      env_name            = "AUTH_DATABASE_URL"
+      key_vault_secret_id = azurerm_key_vault_secret.auth_database_url.versionless_id
+    }
     "session-secret" = {
       env_name            = "SESSION_SECRET"
       key_vault_secret_id = azurerm_key_vault_secret.session_secret.versionless_id
@@ -71,7 +75,21 @@ output "migrate_secrets" {
       env_name            = "APP_ROLE_PASSWORD"
       key_vault_secret_id = azurerm_key_vault_secret.app_role_password.versionless_id
     }
+    "auth-role-password" = {
+      env_name            = "AUTH_ROLE_PASSWORD"
+      key_vault_secret_id = azurerm_key_vault_secret.auth_role_password.versionless_id
+    }
   }
+}
+
+output "app_base_url" {
+  description = "The origin a browser sees (APP_BASE_URL): the only origin the API accepts state-changing requests from, and the one session cookies are issued for. Not a secret."
+  value       = "https://${coalesce(local.custom_domain, module.edge.endpoint_host)}"
+}
+
+output "auth_trusted_proxies" {
+  description = "CIDR ranges of the reverse proxies in front of the API (AUTH_TRUSTED_PROXIES): Front Door's backend ranges. Not a secret."
+  value       = data.azurerm_network_service_tags.front_door_backend.address_prefixes
 }
 
 output "edge_host" {

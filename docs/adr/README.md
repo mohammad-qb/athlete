@@ -12,6 +12,7 @@ hardening the vertical slice, in the order they were made.
 | [0003](./0003-flat-conditions-and-resolved-scope.md) | Flat rule conditions; coach scope resolved once per request | Accepted |
 | [0004](./0004-privilege-matrix-and-voiding.md) | A database privilege matrix, and voiding instead of deleting | Accepted |
 | [0005](./0005-terraform-privilege-split.md) | Terraform split by who applies it; a deploy identity that cannot touch IAM | Accepted — never applied |
+| [0006](./0006-cookie-sessions-and-the-auth-role.md) | Cookie sessions as database rows; better-auth on its own database role | Accepted |
 
 Two decisions of the same period are argued in the proposal itself rather than here:
 validation on by default
@@ -21,7 +22,8 @@ validation on by default
 
 The phase-by-phase record of how these were built, including every deviation from the
 plan and every defect found on the way, is
-[`plans/backend-foundations.md`](../plans/backend-foundations.md).
+[`plans/backend-foundations.md`](../plans/backend-foundations.md) for 0001 to 0005 and
+[`plans/frontend-v1.md`](../plans/frontend-v1.md) from 0006.
 
 ## Shape
 

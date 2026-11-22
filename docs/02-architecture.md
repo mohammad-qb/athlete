@@ -98,7 +98,7 @@ asked two different questions at two different moments.
 | | Coarse | Scoped |
 |---|---|---|
 | Question | May this role *ever* do this? | To *which rows*? |
-| Built | In the guard, from the token alone | Inside the tenant transaction, once per request |
+| Built | In the guard, from the roles the user holds in the session's academy | Inside the tenant transaction, once per request |
 | Rules | No conditions | Conditions over the principal's resolved scope |
 | Used by | `@Permission({ action, subject })` on every route | Repository filters and instance checks |
 | Refusal | 403 before any query | 403 or 404, below |
@@ -162,7 +162,7 @@ list, so they get a 403 that says why instead of an inexplicably empty page.
 the tenant boundary on the transaction every query runs in; a tenant clause in the
 ability would be a second, weaker statement of a guarantee the database already makes,
 and a place for the two to disagree. `platform_admin` holds `manage all`, which
-therefore means "everything in the academy the token names", not "everything".
+therefore means "everything in the academy the session is acting in", not "everything".
 
 **Why role logic is not pushed into RLS**, even though it would be leak-proof:
 authorization in SQL policies is hard to unit-test, hard to evolve, and turns a 403

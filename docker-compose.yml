@@ -6,6 +6,7 @@
 #
 #   docker compose up --build
 #   docker compose run --rm migrate
+#   ./scripts/seed-dev.sh              # demo data and two accounts to sign in with
 #
 services:
   postgres:
@@ -46,6 +47,8 @@ services:
       # provisions its credential from Key Vault. Here the migrate step sets one so the
       # API has a non-superuser role it can actually connect as.
       APP_ROLE_PASSWORD: athlete-app-local-password
+      # Likewise for `athlete_auth`, the role better-auth connects as.
+      AUTH_ROLE_PASSWORD: athlete-auth-local-password
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,6 +65,12 @@ services:
       # The application role: non-owner, NOBYPASSRLS, no DELETE on facts. The API checks
       # this at boot and refuses to start on the superuser URL the migrate step uses.
       DATABASE_URL: postgres://athlete_app:athlete-app-local-password@postgres:5432/athlete
+      # The auth role: reads and writes users, sessions and password hashes, and holds
+      # nothing on any tenant-owned table. better-auth alone connects with it.
+      AUTH_DATABASE_URL: postgres://athlete_auth:athlete-auth-local-password@postgres:5432/athlete
+      # The origin a browser sees. Here that is the API's own published port; once the
+      # SPA exists (frontend plan, phase 3) it is the origin that serves the SPA.
+      APP_BASE_URL: 'http://localhost:${API_PORT:-3000}'
       SESSION_SECRET: local-development-secret-at-least-32-chars
     ports:
       - '${API_PORT:-3000}:3000'

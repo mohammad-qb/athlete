@@ -4,8 +4,9 @@
 # reach.
 #
 # Two identities, so that code serving requests can never read the owner credential:
-#   api      -> database-url (athlete_app), session-secret, telemetry connection string
-#   migrate  -> database-migration-url (owner), app-role-password
+#   api      -> database-url (athlete_app), auth-database-url (athlete_auth),
+#               session-secret, telemetry connection string
+#   migrate  -> database-migration-url (owner), app-role-password, auth-role-password
 # Neither can read postgres-admin-password or use the backup key.
 # ---------------------------------------------------------------------------
 
@@ -33,10 +34,12 @@ locals {
   # either identity read every secret in it, including the other's.
   secret_readers = {
     "api/database-url"                  = { identity = "api", scope = azurerm_key_vault_secret.database_url.resource_versionless_id }
+    "api/auth-database-url"             = { identity = "api", scope = azurerm_key_vault_secret.auth_database_url.resource_versionless_id }
     "api/session-secret"                = { identity = "api", scope = azurerm_key_vault_secret.session_secret.resource_versionless_id }
     "api/appinsights-connection-string" = { identity = "api", scope = azurerm_key_vault_secret.appinsights_connection_string.resource_versionless_id }
     "migrate/database-migration-url"    = { identity = "migrate", scope = azurerm_key_vault_secret.database_migration_url.resource_versionless_id }
     "migrate/app-role-password"         = { identity = "migrate", scope = azurerm_key_vault_secret.app_role_password.resource_versionless_id }
+    "migrate/auth-role-password"        = { identity = "migrate", scope = azurerm_key_vault_secret.auth_role_password.resource_versionless_id }
   }
 }
 

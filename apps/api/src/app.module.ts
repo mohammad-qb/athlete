@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { loadEnv } from '@athlete/config';
 import { CommonModule } from './common/common.module';
 import { AuthorizationGuard } from './common/authz/authorization.guard';
+import { OriginGuard } from './common/http/origin.guard';
 import { TenantTransactionInterceptor } from './common/tenancy/tenant-transaction.interceptor';
 import { ValidationInterceptor } from './common/validation/validation.interceptor';
 import { AuthModule } from './modules/auth/auth.module';
@@ -25,9 +27,13 @@ export const API_GLOBAL_PREFIX = 'api/v1';
   imports: [CommonModule, AuthModule, AthletesModule, TeamsModule, SessionsModule],
   controllers: [HealthController],
   providers: [
-    // Global guards run in registration order: identify first, then decide.
+    // Global guards run in registration order. First, before a cookie is even read: a
+    // state-changing request from another origin is refused (CSRF).
+    { provide: APP_GUARD, useFactory: () => new OriginGuard(loadEnv().APP_BASE_URL) },
+    // Then identify, then decide.
     { provide: APP_GUARD, useClass: AuthenticationGuard },
-    // Deny by default: a route without @Permission or @Public is refused.
+    // Deny by default: a route that does not declare exactly one of @Permission,
+    // @Authenticated and @Public is refused.
     { provide: APP_GUARD, useClass: AuthorizationGuard },
     // Interceptors run in registration order. Input is parsed first, so a malformed
     // request is refused before a transaction is opened for it.

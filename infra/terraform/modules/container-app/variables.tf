@@ -59,6 +59,21 @@ variable "migrate_secrets" {
   }))
 }
 
+variable "app_base_url" {
+  description = "The origin a browser sees, e.g. https://app.example.com. Passed to the API as APP_BASE_URL: the origin its CSRF check accepts and session cookies are issued for."
+  type        = string
+
+  validation {
+    condition     = can(regex("^https://[^/]+$", var.app_base_url))
+    error_message = "app_base_url must be an https origin with no path or trailing slash."
+  }
+}
+
+variable "trusted_proxies" {
+  description = "IPs or CIDR ranges of the reverse proxies in front of the API (Front Door's backend ranges). Passed as AUTH_TRUSTED_PROXIES so the sign-in rate limit can resolve the client address from X-Forwarded-For."
+  type        = list(string)
+}
+
 variable "min_replicas" {
   description = "Minimum API replicas."
   type        = number

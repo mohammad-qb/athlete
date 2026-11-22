@@ -57,7 +57,10 @@ describe('boot-time database privilege assertion', () => {
     ['column_privileges', 'team_coach_assignments.valid_from:UPDATE', /UPDATE \(valid_from\) on team_coach/],
     // A column-level grant of any other kind is excess even on a column it may UPDATE.
     ['column_privileges', 'user_academy_roles.role:INSERT', /INSERT \(role\) on user_academy_roles/],
-    ['column_privileges', 'users.password_hash:SELECT', /SELECT \(password_hash\) on users/],
+    ['column_privileges', 'users.email:SELECT', /SELECT \(email\) on users/],
+    // The credential tables: a session token or a password hash is never the application role's to read.
+    ['table_privileges', 'auth_sessions:SELECT', /SELECT on auth_sessions/],
+    ['column_privileges', 'auth_accounts.password:SELECT', /SELECT \(password\) on auth_accounts/],
     ['column_privileges', 'team_memberships.valid_to:REFERENCES', /REFERENCES \(valid_to\) on team_memberships/],
   ] as const)('reports a privilege outside the matrix: %s %s', (field, held, message) => {
     const probe = { ...applicationRole, [field]: [...applicationRole[field], held] };
