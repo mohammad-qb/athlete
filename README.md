@@ -427,16 +427,16 @@ pnpm install --frozen-lockfile              ✓ lockfile unchanged
 pnpm run build                              ✓ 4 tasks (the SPA bundle included)
 pnpm run typecheck                          ✓ no errors (6 tasks)
 pnpm run lint                               ✓ no errors (7 tasks, type-aware)
-pnpm run lint:boundaries                    ✓ no violations (API: 81 modules, 183 dependencies;
-                                              SPA: 69 modules, 115 dependencies)
-test (unit + route coverage + HTTP)         ✓ 309 passed (17 files)
-web test (Vitest, jsdom)                    ✓ 59 passed (7 files)
+pnpm run lint:boundaries                    ✓ no violations (API: 82 modules, 185 dependencies;
+                                              SPA: 100 modules, 224 dependencies)
+test (unit + route coverage + HTTP)         ✓ 315 passed (18 files)
+web test (Vitest, jsdom)                    ✓ 118 passed (16 files)
 test:integration (real Postgres)            ✓ 135 passed (10 files)
 web generate + git diff --exit-code         ✓ openapi.json and the generated client unchanged
 docker compose up --build                   ✓ the api and web images build
 docker compose run migrate                  ✓ Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql, 0003_auth.sql
-./scripts/smoke.sh (containerised stack)    ✓ 90/90 checks passed
-web test:e2e (Playwright, same stack)       ✓ 11 passed
+./scripts/smoke.sh (containerised stack)    ✓ 97/97 checks passed
+web test:e2e (Playwright, same stack)       ✓ 20 passed
 ```
 
 Smoke before end-to-end, as above: the end-to-end setup adds athletes to Alpha Academy
@@ -483,6 +483,13 @@ Error contract (one shape for every failure, not just a status code)
   PASS  conflict carries a stable code               stale_write
   PASS  a refusal is typed NOT_FOUND                 NOT_FOUND
   PASS  no cookie is typed UNAUTHORIZED              UNAUTHORIZED
+  PASS  an overlapping membership is a 409           409
+  PASS  ...with a stable code                        membership_overlap
+  PASS  a membership ending before it starts         membership_period_invalid
+  PASS  a membership for an unknown athlete          athlete_not_found
+  PASS  a transfer dated before the athlete joined   membership_period_invalid
+  PASS  a transfer from a team the athlete is not on no_open_membership
+  PASS  the refused transfer changed nothing         44444444-4444-4444-4444-444444444444
 
 Validation (on by default; a 200 never means "nothing happened")
   PASS  malformed body is refused                    400
@@ -569,7 +576,7 @@ Signing out (the row is deleted, so a copied cookie is worth nothing)
 All smoke checks passed.
 ```
 
-The script is re-runnable: a second run against the same volume also passes 90/90, with
+The script is re-runnable: a second run against the same volume also passes 97/97, with
 a higher integer on the ETag line. It takes about half a minute, most of it spent
 waiting out the sign-in rate limit it then asserts.
 
@@ -743,10 +750,11 @@ Scope choices, each one a decision rather than an omission:
   works and is tested at the database, as the application role; no route does it. The
   rule that a departed coach keeps the assessments they authored is designed and has
   no route to apply to.
-- **Most of the web application's screens.** `apps/web` is a working SPA on the typed
-  client generated from [`apps/api/openapi.json`](./apps/api/openapi.json): sign in,
+- **The coach's screens of the web application.** `apps/web` is a working SPA on the
+  typed client generated from [`apps/api/openapi.json`](./apps/api/openapi.json): sign in,
   sign out, change password, the shell with a role-aware menu and an academy switcher,
-  and the athletes list. Creating and editing athletes, teams, sessions and the
+  athletes (list, add, edit, with a dialog that resolves an edit conflict) and teams
+  (list, create, roster as of a day, add an athlete, transfer). Sessions and the
   attendance register are not built yet
   ([`apps/web/README.md`](./apps/web/README.md),
   [`docs/plans/frontend-v1.md`](./docs/plans/frontend-v1.md)).
@@ -777,7 +785,7 @@ apps/
     test/               unit + Testcontainers integration
     src/openapi/        the route walk and the OpenAPI generator
     openapi.json        GENERATED from the contracts and route metadata; committed
-  web/                  React + Vite SPA: shell, sign-in, athletes list (more screens to come)
+  web/                  React + Vite SPA: shell, sign-in, athletes and teams (sessions to come)
     src/routes/         thin route files: search schema, guard, loader
     src/features/       one folder per feature, public through index.ts only
     src/components/     shared composites; ui/ holds the shadcn primitives

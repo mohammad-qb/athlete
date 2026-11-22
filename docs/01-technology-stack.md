@@ -156,8 +156,10 @@ reuses `packages/contracts`.
 **What is built.** `apps/web` is that SPA: React 19, Vite, TanStack Router, Query, Table
 and Form, shadcn/ui. So far it holds the foundation every screen reuses (the generated
 client, one error mapper, permissions read from `GET /me`, a server-driven list table,
-form fields that take the server's validation messages) and the first screens: sign in,
-change password, and the athletes list. Its structure is enforced like the API's: thin
+form fields that take the server's validation messages, one conflict dialog for a
+refused stale write) and the administrator's screens: sign in, change password, athletes
+(list, add, edit) and teams (list, create, roster as of a day, add, transfer). Sessions
+and the attendance register are not built yet. Its structure is enforced like the API's: thin
 routes over features that may not import each other, checked by dependency-cruiser. In
 the compose stack an nginx container serves the bundle and proxies `/api`, reproducing
 the single origin Front Door provides; it is a local stand-in, not a second deployable.
