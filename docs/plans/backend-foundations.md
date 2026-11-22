@@ -19,15 +19,15 @@ sync client, no OpenAPI client generation beyond the document itself, and no mov
 | Phase | Name | Status |
 |---|---|---|
 | 1 | Repo guardrails + error contract | done |
-| 2 | Authorization model (CASL + SQL compiler) | not started |
+| 2 | Authorization model (CASL + SQL compiler) | done |
 | 3 | Enforce scoping (the live hole) | not started |
 | 4 | Database privileges + fact immutability | not started |
 | 5 | Validation on by default | not started |
 | 6 | Terraform restructure + secrets | not started |
 | 7 | Docs, ADRs, verified state | not started |
 
-**Current phase:** 1 — done.
-**Recommended next phase:** 2.
+**Current phase:** 2 — done.
+**Recommended next phase:** 3.
 
 Phase 6 touches no application code and may run in parallel with 2–5 if two sessions are
 available; every other phase depends on the one before it.
@@ -373,13 +373,13 @@ with identical behaviour and a green suite. This is the risky phase; it is early
 
 **Tasks.**
 
-- [ ] `@casl/ability` added; `Action`/`Subject` in contracts
-- [ ] `defineAbility` with both modes + unit tests per role
-- [ ] `toSqlWhere` + unit tests including the unknown-operator throw
-- [ ] `accessibleBy` merge + fail-loud test
-- [ ] `@Permission` swapped in across all routes; guard updated; `@Authorize` deleted
-- [ ] scope sets + scoped ability on the request context
-- [ ] route-coverage test extended both directions; manifest emitted and committed
+- [x] `@casl/ability` added; `Action`/`Subject` in contracts
+- [x] `defineAbility` with both modes + unit tests per role
+- [x] `toSqlWhere` + unit tests including the unknown-operator throw
+- [x] `accessibleBy` merge + fail-loud test
+- [x] `@Permission` swapped in across all routes; guard updated; `@Authorize` deleted
+- [x] scope sets + scoped ability on the request context
+- [x] route-coverage test extended both directions; manifest emitted and committed
 
 **Exit criteria.**
 
@@ -390,8 +390,65 @@ Same command block as phase 1, all green, plus:
 - `docs/reference/route-manifest.md` is committed and matches the walk.
 - Behaviour is unchanged: the 17 integration tests and `smoke.sh` pass untouched.
 
+**Verified on 2026-11-22** (macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2,
+`postgres:17-alpine`): typecheck 5 tasks clean; `lint` 6 tasks clean; `lint:boundaries`
+no violations (56 modules, 112 dependencies); unit 129 passed (8 files); integration 26
+passed (5 files — the 17 existing tests untouched, plus 9 for scope resolution);
+`smoke.sh` 16/16 with the script unmodified. Negative checks: deleting a `@Permission`
+fails three route-coverage tests; `subject: 'athlete'` fails `typecheck` with TS2820.
+
 ### Deviations
-_(none yet)_
+- **Coach grants widened beyond the plan's list, to keep behaviour identical.** The plan
+  gives a coach no `update` on `athletes` and no `read` on `sessionParticipants`, but
+  `PATCH /athletes/:id` and `GET /sessions/:id/attendance` admitted coaches before this
+  phase. Both grants were added (scoped to `visibleAthleteIds` / `teamIdAtTime`); the
+  "mirrors the role lists" test in `authz.ability.unit.spec.ts` pins the equivalence.
+  Whether a coach *should* edit athlete records is a product question left open.
+- **`platform_admin` is now admitted by the guard.** No route listed that role before, so
+  it was refused everywhere; `can('manage','all')` (as the plan specifies) admits it to
+  every route, still confined to the token's academy by RLS. This is the one intended
+  behaviour change in a phase described as having none.
+- **`moduleResolution` moved from `node` to `node16`** (and `module` to `node16`) in
+  `tsconfig.base.json`. `@casl/ability@7` publishes its types only through the package
+  `exports` map, which the legacy resolver does not read. Emit is still CommonJS.
+  `tsconfig.depcruise.json` is unchanged (dependency-cruiser resolves `exports` itself).
+- **`accessibleBy` delegates the rule merge to CASL's `rulesToCondition`**
+  (`@casl/ability/extra`) rather than restating askedgar's; only the leaf conversion
+  (`toSqlWhere`) is hand-written. Its signature is
+  `accessibleBy(ability, action, subject, columns)`, returning `SQL | undefined`.
+- **Negations are compiled NULL-faithfully** (`is distinct from`, `(…) is not true`,
+  `IS NULL OR NOT IN`) so SQL agrees with CASL's in-memory matcher on null columns —
+  not in the plan, but the plan's own argument against SQL/in-memory asymmetry requires it.
+  The same holds for ordering: CASL coerces a null field to 0, so `$lt 5` matches null
+  and `$gt -1` does too. `toSqlWhere` emits `col IS NULL OR …` exactly where CASL would
+  match, and refuses a boolean ordering operand because CASL throws on one.
+- **`asOf` is the database's clock, not the host's.** `runInTenantTransaction` reads the
+  transaction's `now()` in the same statement as `set_config` and passes it to its
+  callback as `startedAt`; the interceptor hands that to the scope resolver. No extra
+  round-trip. It is truncated to milliseconds (a JS `Date`), while `PolicyService` still
+  compares against microsecond `now()`, so the two can differ on a boundary inside one
+  millisecond until phase 3 retires `PolicyService`.
+- **The route manifest lists paths as served** (`/api/v1/...`). The prefix is one
+  constant, `API_GLOBAL_PREFIX` in `app.module.ts`, shared by `main.ts` and the generator.
+  The route walk resolves metadata with the guard's own `Reflector` lookup, so
+  controller-level `@Permission`/`@Public` is audited the way it is enforced.
+- **Scope queries live in `common/authz/principal-scope.repository.ts`**, not in the
+  interceptor. Named `*.repository.ts` so it falls under the existing boundary exception;
+  no rule was added. It skips both queries for non-coach principals.
+- **`Principal` moved to `common/authz/principal.ts`** (re-exported from
+  `request-context.ts`) to avoid a type-level import cycle with `ability.ts`, which
+  `no-circular` would have failed. The scope sets are a separate `PrincipalScope` type
+  passed as `defineAbility(principal, { scoped: true, scope })`.
+- **`asSubject(type, row)` and a `SubjectRows` type were added** so rule conditions and
+  instance checks are typed per subject: a condition on an unlisted field does not compile.
+- **Two specs beyond the plan's list:** `authz.guard.unit` and
+  `authz.principal-scope.integration`. The manifest is regenerated with
+  `UPDATE_ROUTE_MANIFEST=1 pnpm --filter @athlete/api run test`.
+- **Not done here, deferred as planned:** nothing filters a query yet. `PolicyService`
+  still performs the resource checks; `accessibleBy` and the scoped ability are built
+  and tested but have no caller until phase 3. README's verified-state numbers and
+  tests table were refreshed; the prose in `docs/01`–`06` still describes the pre-CASL
+  design and is phase 7's job.
 
 ---
 
@@ -409,6 +466,10 @@ currently coach. This closes defect 1.
 - `AthletesService.list()` and `getById()`, `TeamsService.rosterAt()`, and
   `SessionsService.createSession()` go through the scoped ability. `rosterAt`'s `at` parameter
   stays a *query* concern (which period to show); authorization is the team scope.
+- Instance checks must be given every field the rule conditions on. CASL treats a
+  *missing* field differently from a null one (a missing field always matches
+  `$lt`/`$lte`), so `asSubject` on a partially selected row can pass where the full row
+  would not. The `SubjectRows` type requires the fields; do not cast around it.
 - `PolicyService` is deleted. `assertCanAccessAthlete`/`assertCanRecordAttendanceForTeam` become
   in-memory instance checks against the scoped ability where a loaded row exists, or the filter
   itself where it does not. Remove its `.dependency-cruiser.cjs` exception and its comment.

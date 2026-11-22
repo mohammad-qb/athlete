@@ -16,7 +16,7 @@ import {
   Uuid,
 } from '@athlete/contracts';
 import { AthletesService } from './athletes.service';
-import { Authorize } from '../../common/authz/authorize.decorator';
+import { Permission } from '../../common/authz/permission.decorator';
 import { ZodValidationPipe } from '../../common/http/zod-validation.pipe';
 import { formatETag, parseIfMatch } from '../../common/http/optimistic-concurrency';
 
@@ -26,13 +26,13 @@ export class AthletesController {
   constructor(private readonly athletes: AthletesService) {}
 
   @Get()
-  @Authorize({ roles: ['academy_admin', 'coach'] })
+  @Permission({ action: 'read', subject: 'athletes' })
   list(): Promise<AthleteResponse[]> {
     return this.athletes.list();
   }
 
   @Get(':id')
-  @Authorize({ roles: ['academy_admin', 'coach'] })
+  @Permission({ action: 'read', subject: 'athletes' })
   async getById(
     @Param('id', new ZodValidationPipe(Uuid)) id: string,
     @Res({ passthrough: true }) response: Response,
@@ -43,7 +43,7 @@ export class AthletesController {
   }
 
   @Post()
-  @Authorize({ roles: ['academy_admin'] })
+  @Permission({ action: 'create', subject: 'athletes' })
   async create(
     @Body(new ZodValidationPipe(CreateAthleteRequest)) body: CreateAthleteRequest,
     @Res({ passthrough: true }) response: Response,
@@ -54,7 +54,7 @@ export class AthletesController {
   }
 
   @Patch(':id')
-  @Authorize({ roles: ['academy_admin', 'coach'] })
+  @Permission({ action: 'update', subject: 'athletes' })
   async update(
     @Param('id', new ZodValidationPipe(Uuid)) id: string,
     @Headers('if-match') ifMatch: string | undefined,

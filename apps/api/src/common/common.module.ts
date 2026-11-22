@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { loadEnv } from '@athlete/config';
 import { DatabaseService } from './tenancy/database.service';
 import { PolicyService } from './authz/policy.service';
+import { PrincipalScopeRepository } from './authz/principal-scope.repository';
 
 /**
  * Global so feature modules get the database and policy services without re-declaring
@@ -19,7 +20,8 @@ import { PolicyService } from './authz/policy.service';
       },
     },
     PolicyService,
+    PrincipalScopeRepository,
   ],
-  exports: [DatabaseService, PolicyService],
+  exports: [DatabaseService, PolicyService, PrincipalScopeRepository],
 })
 export class CommonModule {}

@@ -31,14 +31,30 @@ export class DatabaseService implements OnModuleDestroy {
    * correctly behind a transaction-mode pooler.
    *
    * A thrown error rolls the whole thing back, so a failed request writes nothing.
+   *
+   * The same statement reads the transaction's `now()` and hands it to the callback as
+   * `startedAt`. Anything that must agree with the periods stored in the database --
+   * which assignments are current, above all -- takes its instant from here rather than
+   * from this process's clock: an API host that lags would keep an expired assignment
+   * in scope, and one that leads would activate a future one early. Riding on the
+   * set_config round-trip, it costs no extra query. Read as epoch milliseconds so the
+   * value does not depend on how the driver parses `timestamptz`; a `Date` holds
+   * milliseconds, so the microseconds are truncated.
    */
   async runInTenantTransaction<T>(
     academyId: string,
-    fn: (tx: TenantTx) => Promise<T>,
+    fn: (tx: TenantTx, startedAt: Date) => Promise<T>,
   ): Promise<T> {
     return this.db.transaction(async (tx) => {
-      await tx.execute(sql`select set_config('app.current_academy_id', ${academyId}, true)`);
-      return fn(tx);
+      const result = await tx.execute<{ ms: number }>(
+        sql`select set_config('app.current_academy_id', ${academyId}, true),
+                   floor(extract(epoch from now()) * 1000)::float8 as ms`,
+      );
+      const ms = result.rows[0]?.ms;
+      if (typeof ms !== 'number' || !Number.isFinite(ms)) {
+        throw new Error('Could not read the transaction time from the database');
+      }
+      return fn(tx, new Date(ms));
     });
   }
 

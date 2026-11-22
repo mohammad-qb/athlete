@@ -14,13 +14,19 @@ import { AllExceptionsFilter } from './common/errors/filters/all-exceptions.filt
 import { ApiErrorFilter } from './common/errors/filters/api-error.filter';
 import { HttpExceptionFilter } from './common/errors/filters/http-exception.filter';
 
+/**
+ * Every controller is mounted under this prefix. A constant rather than a literal in
+ * `main.ts` so the route manifest prints the paths a client actually calls.
+ */
+export const API_GLOBAL_PREFIX = 'api/v1';
+
 @Module({
   imports: [CommonModule, AuthModule, AthletesModule, TeamsModule, SessionsModule],
   controllers: [HealthController],
   providers: [
     // Global guards run in registration order: identify first, then decide.
     { provide: APP_GUARD, useClass: AuthenticationGuard },
-    // Deny by default: a route without @Authorize or @Public is refused.
+    // Deny by default: a route without @Permission or @Public is refused.
     { provide: APP_GUARD, useClass: AuthorizationGuard },
     // Every authenticated request runs inside a tenant-scoped transaction.
     { provide: APP_INTERCEPTOR, useClass: TenantTransactionInterceptor },
