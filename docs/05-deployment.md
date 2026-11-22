@@ -48,11 +48,30 @@ position we actually hold is:
 | Component | Service | Sizing at launch |
 |---|---|---|
 | API | Container Apps | 2–6 replicas, 0.5 vCPU / 1 GiB |
-| Database | PostgreSQL Flexible Server | `B_Standard_B2s`, 64 GB, zone-redundant HA |
-| SPA | Blob static website + Front Door | — |
+| Database | PostgreSQL Flexible Server, VNet-only | `GP_Standard_D2ds_v4`, 64 GB, zone-redundant HA |
+| SPA | Blob static website | — |
+| Edge | Front Door **Standard** | One hostname; `/api/*` to the API, the rest to the SPA; one rate-limit rule |
 | Images | Container Registry (Basic, no admin user) | — |
 | Secrets | Key Vault (RBAC) + managed identity | — |
 | Telemetry | Log Analytics + Application Insights | 90-day retention |
+
+**Why the database is not the Burstable `B2s` an earlier version of this table named.**
+Azure does not offer high availability on Burstable SKUs, so "B2s with zone-redundant
+HA" cannot be created. That was found by writing the Terraform, not by reading a
+pricing page; the `postgres` module now rejects the pair and a test pins it. The
+reliability argument below (the single-AZ row of the RPO/RTO table) depends on HA, so
+HA was kept and the SKU moved to the smallest General Purpose size. It costs more, the
+cost table below says how much, and the cheaper pairing — B2s without HA — is one of
+the 40% levers rather than the launch configuration. Reverting is three lines in
+`stacks/prod/base/locals.tf`.
+
+**What "Front Door" does and does not mean here.** Standard, not Premium. Standard has
+no managed WAF rule sets (OWASP, bot protection) and no Private Link origins, so the
+WAF is **one per-IP rate limit**, and both origins also answer directly on their own
+hostnames — the edge can be bypassed. Premium closes both gaps at roughly ten times
+the base price. This is recorded as a known gap in
+[`infra/terraform/README.md`](../infra/terraform/README.md#known-gaps), not presented
+as a web application firewall.
 
 **No Kubernetes.** Containers plus managed Postgres means the same image runs under
 `docker compose` on one VM — which is how "single server" and "budget cut 40%" are
@@ -60,32 +79,64 @@ answered without redesign.
 
 **No stored credentials anywhere.** CI authenticates to Azure via **OIDC federation**;
 the app pulls its image and reads its secrets with a **user-assigned managed identity**.
-No registry password, no connection string in GitHub, none in the repository.
+No registry password, no connection string in GitHub, none in the repository — and,
+because the generated passwords are passed only to write-only arguments, none in
+Terraform state.
+
+**The pipeline can ship a revision and nothing else.** The Terraform is split so that
+this is a property of the code: `shared` and `<env>/base` (identity, network, database,
+Key Vault, and the deploy identity's own grants) are applied by a human operator group;
+`<env>/app` (the container app and the migration job) is applied by CI. The deploy
+identity holds a custom role of nine listed actions on the app resource group, no
+`delete`, no role-assignment write, and nothing on the network, the database or Key
+Vault. The full list, and the honest limit of it — shipping a revision is running code
+as the API's identity, and the pipeline can start the migration job, which runs as the
+database owner — is in
+[`infra/terraform/README.md`](../infra/terraform/README.md#what-the-deploy-identity-can-do)
+and [ADR 0005](./adr/0005-terraform-privilege-split.md).
 
 ## Environments
 
 | Environment | Purpose | Differences |
 |---|---|---|
-| `dev` | Local | `docker compose`: API + Postgres. Identical image. |
-| `staging` | Pre-production | Single-zone DB, 1 replica, scale-to-zero, anonymised data |
-| `prod` | Production | Zone-redundant HA, min 2 replicas, manual approval gate |
+| local | A developer's machine | `docker compose`: API + Postgres. Identical image. |
+| `dev` | Pre-production, on Azure | Burstable `B2s`, single zone, no HA, no geo-redundant backup; 1–2 replicas; 30-day logs |
+| `prod` | Production | General Purpose, zone-redundant HA, geo-redundant backup; 2–6 replicas; manual approval gate |
 
-Each is a separate Terraform workspace with its own state. Production deploys require
-approval through a GitHub environment.
+`dev` and `prod` are the same Terraform files; everything that differs is in the first
+block of each stack's `locals.tf`. Each stack has its own state, in its own blob
+container, because blob RBAC stops at the container. One registry serves both:
+production never builds, it deploys the image **digest** `dev` pushed and tested.
+Production deploys require approval through a GitHub environment, which is configured
+in GitHub and not in this repository.
+
+An earlier version of this table called the pre-production environment `staging` and
+described Terraform workspaces. The code has two Azure environments named `dev` and
+`prod` and no workspaces; the table now says what exists. Anonymised production data in
+`dev` is a process that is not built.
 
 ## CI/CD
 
 ```
-PR:    install → build packages → typecheck → lint:boundaries
+PR:    install → build packages → typecheck → lint (type-aware) → lint:boundaries
                 → unit tests → integration tests (Testcontainers + real Postgres)
+                → smoke: the containerised stack, migrated, checked over HTTP
+                → terraform: fmt, validate, mocked-provider tests, tflint
 
-main:  all of the above
-         → build image, push to ACR (OIDC, no secret)
-         → MIGRATION JOB  ← separate step, before the app deploy
-         → deploy Container App revision
-         → smoke check /api/v1/health
-         → on failure: revert to previous revision (schema unchanged)
+deploy (NOT WRITTEN — the shape the infrastructure is built for):
+         → dev only: build image, push to ACR (OIDC, no secret), record the digest
+           prod: take the digest dev deployed
+         → point the MIGRATION JOB at the new image (a targeted apply)
+         → start the job inside the VNet and wait  ← before the app changes
+         → full apply: create or roll the Container App revision
+         → upload the SPA bundle; smoke check /api/v1/health through the edge
+         → on failure: re-apply the previous digest (schema unchanged)
 ```
+
+The PR half is real and runs in `.github/workflows/ci.yml`. The deploy half is prose:
+there is no Azure subscription and no deploy workflow. The migration runs as a
+Container Apps Job rather than from the runner because Postgres has no public endpoint,
+so a hosted runner cannot reach it.
 
 **Migrations never run on container start.** Two booting replicas would race the same
 migration. They run as their own job, before the deploy, with the application still on
@@ -112,21 +163,27 @@ rather than a runbook:
 | Control | Implementation |
 |---|---|
 | Tenant isolation | Postgres RLS + composite FKs + app-layer scoping |
-| Authorization | Deny-by-default global guard; route coverage asserted in CI |
+| Authorization | One CASL policy: deny-by-default guard per route, compiled row filters in every repository read; route coverage asserted in CI |
+| Input | Every route declares its schemas; unknown keys refused; an undeclared read fails closed |
+| Errors | One responder; unexpected failures redacted to a blanket message, cause chain logged only |
 | Transport | TLS everywhere; `require_secure_transport = ON` on Postgres |
 | Secrets | Key Vault + managed identity; no deployed secret in CI or repo. The one committed env file, `.env.development`, holds local-only values, encrypted with dotenvx; its key is not committed |
-| Credentials | argon2id, refresh rotation, TOTP available (auth library) |
-| Database access | App connects as non-owner `NOBYPASSRLS` role |
-| Edge | Front Door WAF *(stubbed)* |
-| Audit | Recorded facts are append-only; `ON DELETE RESTRICT` on history |
+| Credentials | better-auth: memory-hard password hashing, revocable database sessions, TOTP available *(named in [01 §7](./01-technology-stack.md#7-authentication--better-auth-users-in-our-own-postgres); not integrated in this slice)* |
+| Database access | App connects as a non-owner `NOBYPASSRLS` role holding a per-table privilege matrix with no `DELETE`; checked at boot, and the API refuses to start otherwise |
+| Deploy identity | Federated to one repository + environment; can write the app resource group and nothing that decides who can reach what |
+| Edge | Front Door Standard: TLS and one rate-limit rule. No managed WAF rules, and origins are reachable directly *(written, unapplied; gaps named above)* |
+| Network | Postgres is VNet-only. Key Vault, registry and storage still have public endpoints behind Entra ID + RBAC |
+| Audit | Recorded facts are read, append, void: never edited, never deleted. Parents of facts `RESTRICT`; the application role cannot delete at all |
 | Data residency | Primary, DR, telemetry and identity all in-country; backups leave as ciphertext only |
 | Patching | Managed services; base image rebuilt on every deploy |
 
 **UAE PDPL considerations.** Athletes are frequently minors and performance data is
 health-adjacent, so: lawful basis and guardian consent for minors, data-subject access
-and deletion requests (which `ON DELETE RESTRICT` deliberately complicates — deletion
-requests are handled by anonymisation of the athlete record, preserving the integrity of
-historical registers), and cross-border transfer handled by client-side encryption with
+and deletion requests (which the no-`DELETE` matrix and `ON DELETE RESTRICT`
+deliberately complicate — deletion requests are handled by anonymisation of the athlete
+record, preserving the integrity of historical registers; a true erasure is a platform
+operation under the owner identity, not something the API can do), and cross-border
+transfer handled by client-side encryption with
 in-country key custody.
 
 ## Backup, and the RPO/RTO table
@@ -171,16 +228,23 @@ shapes rather than quotes.
 | Component | Launch (~200 concurrent) | 10× (~2,000 concurrent) |
 |---|---|---|
 | Container Apps (API) | 45–70 | 150–250 |
-| PostgreSQL Flexible Server | 90–120 | 450–700 (incl. read replica) |
-| Zone-redundant HA uplift | 70–90 | included above |
+| PostgreSQL Flexible Server (`D2ds_v4`, 64 GB) | 150–180 | 450–700 (incl. read replica) |
+| Zone-redundant HA uplift (a second server) | 150–180 | included above |
 | Blob + Front Door | 40–60 | 100–150 |
 | Container Registry, Key Vault | 10–15 | 15–25 |
 | Log Analytics + App Insights | 20–30 | 65–125 |
 | Geo-redundant backup | 10–20 | 25–40 |
 | Off-provider encrypted dump | 1–5 | 5–10 |
-| **Total** | **~$290–410** | **~$810–1,300** |
+| **Total** | **~$430–560** | **~$810–1,300** |
 
-Launch without zone-redundant HA: **~$220–320/month**.
+Launch without zone-redundant HA: **~$280–380/month**. On Burstable `B2s` without HA
+(the configuration `dev` runs): **~$220–320/month**.
+
+**These totals rose by about $140 when the SKU was corrected**, and the two database
+rows are the least certain numbers in this document. They were derived from the
+General Purpose list price in a cheaper region plus the regional premium, not read from
+the calculator for UAE North; and HA is priced as a second server because that is what
+it is. The 10× column was not re-derived.
 
 **Assumptions:** ~20 academies; < 2 GB database growing ~0.5 GB/year; ~50 GB/month
 egress at launch; 5–10 GB/month log ingestion; non-production environments scale to zero
@@ -193,13 +257,19 @@ the point:
 
 | Step | Saving | What it costs |
 |---|---|---|
-| 1-year reserved instance on Postgres | 30–40% of the DB line | Nothing. No design change, no guarantee weakened. |
+| 1-year reservation on Postgres compute | 30–40% of the DB lines: ~$100–125 | Nothing. No design change, no guarantee weakened. |
 | Right-size after measuring | 10–20% | Nothing, if measurement says so |
-| Drop zone-redundant HA | ~$70–90 | AZ failure becomes a ~1 h restore instead of automatic failover. State the new RTO. |
-| Burstable DB tier | ~$40 | Slower under sustained load |
-| Front Door → Blob + Cloudflare | ~$35 | Lose Azure-native WAF |
+| Drop zone-redundant HA | ~$150–180 | AZ failure becomes a ~1 h restore instead of automatic failover. State the new RTO. |
+| Then Burstable `B2s` | ~$60 | Slower under sustained load. Only available once HA is off: Azure has no HA on Burstable |
+| Front Door → Blob + Cloudflare | ~$35 | A second vendor at the edge. Little security is lost: the Azure WAF here is one rate limit |
 | Log retention 90 → 30 days | ~$10 | Shorter forensic window |
-| **Result** | | **~$130–180/month** |
+| **Result, all levers** | | **~$150–240/month** |
+
+A 40% cut is ~$170–225. **The reservation alone no longer reaches it**: it is about a
+quarter of the bill, where on the cheaper SKU an earlier version of this table implied
+the commercial lever might be enough. The honest answer is the reservation **plus
+dropping HA**, which together clear the target and cost exactly one thing — an AZ
+failure becomes a restore. Everything below that line is headroom, not necessity.
 
 **Single-server fallback** (the brief's other scenario): one VM running API + Postgres +
 Caddy under `docker compose`, backups to object storage — **~$80–100/month**. The price

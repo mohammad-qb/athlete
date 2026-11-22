@@ -54,7 +54,7 @@ Diagnose in this order, because the cheap causes are overwhelmingly the likely o
 | N+1 queries | Request traces in Application Insights | Batch or join |
 | Long transactions holding connections | `pg_stat_activity` | Statement timeouts; no external HTTP calls inside a request transaction |
 | Reporting competing with writes | Query mix by endpoint | Read replica |
-| Genuinely insufficient resources | Sustained CPU/IOPS saturation | Vertical scale — a single step from B2s to D4ds_v5 is ~8× the compute |
+| Genuinely insufficient resources | Sustained CPU/IOPS saturation | Vertical scale — production starts on the smallest General Purpose size (2 vCores); each step up doubles it |
 | Table genuinely too large | Row counts, index bloat | Monthly partitioning of `session_participants` |
 
 Vertical scaling is listed deliberately: at this data size, moving one SKU tier is
@@ -89,7 +89,8 @@ is a hypothesis.
 The worst-case failure for a multi-academy platform: not downtime, but one academy
 seeing another's athletes. Mitigated with three independent mechanisms (RLS with
 `WITH CHECK`, composite foreign keys, application-layer scoping), a fail-closed default,
-and tests that run as the actual `NOBYPASSRLS` application role.
+tests that run as the actual `NOBYPASSRLS` application role, and an API that refuses to
+boot as any other role.
 
 ### 3. A schema change that breaks a running deploy
 
