@@ -19,8 +19,10 @@ API_PORT="${API_PORT:-3000}"
 BASE="http://localhost:${API_PORT}/api/v1"
 # better-auth's own routes: beside the versioned API, not under it.
 AUTH="http://localhost:${API_PORT}/api/auth"
-# The origin the stack was told the browser uses (APP_BASE_URL in docker-compose.yml).
-ORIGIN="http://localhost:${API_PORT}"
+# The origin the stack was told the browser uses (APP_BASE_URL in docker-compose.yml):
+# the `web` service that serves the SPA. This script talks to the API directly and
+# states that origin, as a browser on the SPA would.
+ORIGIN="http://localhost:${WEB_PORT:-8080}"
 export SEED_PASSWORD="${SEED_PASSWORD:-athlete-dev-password}"
 
 ACADEMY_A=11111111-1111-1111-1111-111111111111
@@ -68,16 +70,15 @@ echo "Seeding demo data and accounts..."
 # Academies, teams, athletes, and Alpha's administrator and coach.
 ./scripts/seed-dev.sh > /dev/null || { echo "seed-dev.sh failed"; exit 1; }
 
-# Two more people, through the same operator CLI: Beta's administrator, and someone who
-# belongs to both academies -- the case switching academy exists for.
+# One more person, through the same operator CLI: Beta's administrator. (seed-dev.sh
+# has already created someone who belongs to both academies -- the case switching
+# academy exists for.)
 create_user() { # create_user <email> <name> <academy> <role>
   printf '%s' "$SEED_PASSWORD" |
     docker compose run --rm -T migrate node dist/cli/create-user.js \
       --email "$1" --name "$2" --academy "$3" --role "$4" > /dev/null 2>&1
 }
 create_user admin@beta.test 'Beta Admin' "$ACADEMY_B" academy_admin
-create_user both@alpha.test 'Both Academies' "$ACADEMY_A" coach
-create_user both@alpha.test 'Both Academies' "$ACADEMY_B" academy_admin
 
 JSON='Content-Type: application/json'
 JARS=$(mktemp -d)

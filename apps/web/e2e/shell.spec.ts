@@ -1,0 +1,105 @@
+import { mkdirSync } from 'node:fs';
+import path from 'node:path';
+import { expect, test } from '@playwright/test';
+import { BOTH, PASSWORD, STATE } from './support';
+
+const SHOTS = path.join(import.meta.dirname, 'screenshots');
+const VIEWPORTS = [
+  { name: '1280', width: 1280, height: 800 },
+  { name: '390', width: 390, height: 844 },
+] as const;
+
+async function expectNoHorizontalScroll(page: import('@playwright/test').Page) {
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow, 'horizontal page overflow in px').toBeLessThanOrEqual(0);
+}
+
+test.beforeAll(() => mkdirSync(SHOTS, { recursive: true }));
+
+for (const viewport of VIEWPORTS) {
+  test.describe(`at ${viewport.name}px`, () => {
+    test.use({ viewport: { width: viewport.width, height: viewport.height } });
+
+    test('sign-in fits the screen', async ({ page }) => {
+      await page.goto('/sign-in');
+      await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+      await page.evaluate(() => document.fonts.ready);
+      await expectNoHorizontalScroll(page);
+      await page.screenshot({ path: path.join(SHOTS, `sign-in-${viewport.name}.png`) });
+    });
+
+    test.describe('signed in', () => {
+      test.use({ storageState: STATE.admin });
+
+      test('the athletes list fits the screen', async ({ page }) => {
+        await page.goto('/athletes');
+        await expect(page.locator('tbody tr')).toHaveCount(25);
+        await page.evaluate(() => document.fonts.ready);
+        await expectNoHorizontalScroll(page);
+        await page.screenshot({ path: path.join(SHOTS, `athletes-${viewport.name}.png`) });
+      });
+    });
+  });
+}
+
+test.describe('someone who belongs to two academies', () => {
+  test.use({ storageState: STATE.both });
+
+  test('switches academy, and sees the other academy with the other role', async ({ page }) => {
+    await page.goto('/athletes');
+    const academy = page.getByTestId('active-academy');
+    await expect(academy).toContainText(/Alpha Academy|Beta Academy/);
+
+    // Whichever academy the session is in, go to the other one and back.
+    const start = (await academy.innerText()).includes('Alpha') ? 'Alpha Academy' : 'Beta Academy';
+    const other = start === 'Alpha Academy' ? 'Beta Academy' : 'Alpha Academy';
+    for (const target of [other, start]) {
+      const switched = page.waitForResponse(
+        (response) =>
+          response.url().endsWith('/api/v1/me/active-academy') && response.status() === 200,
+      );
+      await academy.click();
+      await page.getByRole('menuitem', { name: target }).click();
+      await switched;
+      // The menu animates shut; the next round must open a new one, not catch this one.
+      await expect(page.getByRole('menu')).toHaveCount(0);
+      await expect(academy).toContainText(target);
+      await expect(page).toHaveURL(/\/athletes$/);
+      // The page is redrawn for the new academy, never left showing the previous one.
+      // In Beta this person is an administrator of an academy with no athletes; in
+      // Alpha, a coach with no team, whom the API refuses the list.
+      await expect(
+        page.getByText(
+          target === 'Beta Academy'
+            ? 'No athletes yet.'
+            : 'You do not have access to this list in this academy.',
+        ),
+      ).toBeVisible();
+    }
+  });
+});
+
+test.describe('the account page', () => {
+  test.use({ storageState: STATE.both });
+
+  test('refuses a wrong current password on the field, and mismatched passwords before sending', async ({
+    page,
+  }) => {
+    await page.goto('/account');
+    await expect(page.getByRole('heading', { name: 'Account' })).toBeVisible();
+    await expect(page.getByText(`Signed in as ${BOTH.name}`)).toBeVisible();
+
+    await page.getByLabel('Current password').fill(PASSWORD);
+    await page.getByLabel('New password', { exact: true }).fill('a-new-long-password');
+    await page.getByLabel('Confirm new password').fill('a-different-password');
+    await page.getByRole('button', { name: 'Change password' }).click();
+    await expect(page.getByText('The two passwords do not match.')).toBeVisible();
+
+    await page.getByLabel('Current password').fill('not-my-password');
+    await page.getByLabel('Confirm new password').fill('a-new-long-password');
+    await page.getByRole('button', { name: 'Change password' }).click();
+    await expect(page.getByText('That is not your current password.')).toBeVisible();
+  });
+});

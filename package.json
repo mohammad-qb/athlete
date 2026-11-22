@@ -7,12 +7,13 @@
   },
   "scripts": {
     "dev": "dotenvx run --strict -f .env.development -- pnpm --filter @athlete/api run start:dev",
+    "dev:web": "pnpm --filter @athlete/web run dev",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint && eslint --max-warnings 0 .",
     "test": "turbo run test",
     "test:integration": "pnpm --filter @athlete/api test:integration",
-    "lint:boundaries": "depcruise apps/api/src packages --config .dependency-cruiser.cjs"
+    "lint:boundaries": "depcruise apps/api/src packages --config .dependency-cruiser.cjs && depcruise apps/web/src --config .dependency-cruiser.web.cjs"
   },
   "devDependencies": {
     "@athlete/eslint-config": "workspace:*",

@@ -21,12 +21,13 @@ default scrypt stays), no second deployable beyond static files.
 |---|---|---|
 | 1 | Cookie authentication (better-auth, `athlete_auth` role, `/me`) | done |
 | 2 | API contract (response schemas, lists, new reads, OpenAPI, generated client) | done |
-| 3 | Web foundation (shell, design system, sign-in, athletes list, e2e harness) | not started |
+| 3 | Web foundation (shell, design system, sign-in, athletes list, e2e harness) | done |
 | 4 | Admin screens (athlete create/edit + conflict dialog, teams) | not started |
 | 5 | Coach flow (sessions, phone attendance) + docs | not started |
 
-**Current phase:** 2 done (2026-11-22, branch `feat/frontend-v1-phase-2`).
-**Recommended next phase:** 3.
+**Current phase:** 3 done (2026-11-22, branch `feat/frontend-v1-phase-3`). **Stopped here
+for the owner to look at the running UI**, as this plan asks.
+**Recommended next phase:** 4, once the owner has reviewed phase 3.
 
 Phases are strictly sequential. Stop after phase 3 for the owner to look at the running UI
 before building more screens on it.
@@ -658,15 +659,15 @@ builds the stack, migrates, seeds users with the CLI and runs it.
 
 ### Tasks
 
-- [ ] Vite app, router, query client, proxy, Turborepo and root scripts
-- [ ] shadcn + dashboard-01, light only, status tokens, self-hosted font, demo parts removed
-- [ ] `lib/` (client, error mapper, auth client, `can`, session reset)
-- [ ] Shell: sidebar, header, academy switcher, user menu
-- [ ] DataTable and form field wrappers
-- [ ] Sign-in, account, athletes list
-- [ ] Boundary rules, React lint config, logical-classes check
-- [ ] Unit tests, compose `web` service, Playwright sign-in spec, CI job
-- [ ] `apps/web/README.md` rewritten to describe what now exists
+- [x] Vite app, router, query client, proxy, Turborepo and root scripts
+- [x] shadcn + dashboard-01, light only, status tokens, self-hosted font, demo parts removed
+- [x] `lib/` (client, error mapper, auth client, `can`, session reset)
+- [x] Shell: sidebar, header, academy switcher, user menu
+- [x] DataTable and form field wrappers
+- [x] Sign-in, account, athletes list
+- [x] Boundary rules, React lint config, logical-classes check
+- [x] Unit tests, compose `web` service, Playwright sign-in spec, CI job
+- [x] `apps/web/README.md` rewritten to describe what now exists
 
 ### Tests
 
@@ -696,7 +697,83 @@ include their paths in your final message. **Stop here for the owner's review.**
 
 ### Deviations
 
-_None yet._
+- **shadcn was configured by hand, not by `shadcn init`.** CLI 4.23 offers presets (Nova,
+  Vega, ...) and no "new-york" choice, and its prompt cannot be answered non-interactively.
+  `components.json` was written directly (`style: new-york`, `baseColor: neutral`,
+  `rtl: true`) and `shadcn add dashboard-01` run against it, which produced new-york
+  components with logical classes. `add` writes only the sidebar tokens, so the stock
+  neutral theme tokens in `src/index.css` are written out by hand.
+- **The generated primitives import `cn` from shadcn's `cn` package**, as CLI 4.23 emits
+  them; there is no `lib/utils.ts`.
+- **TanStack Table 9**, which the block's code is written for. The shared `DataTable`
+  registers no table features: sorting, search and paging are the server's, so the table
+  draws the page it is given and reports the next list state.
+- **Icons:** Tabler in the shell (as the block uses), Lucide inside `components/ui`.
+- **Removed beyond the chart and drag-to-reorder:** the block's summary cards (dashboards
+  are a non-goal and there is nothing to summarise yet) and the primitives nothing uses
+  (`breadcrumb`, `chart`, `drawer`, `tabs`, `toggle`, `toggle-group`, `checkbox`), plus
+  `next-themes` (the toaster is fixed to light).
+- **Dark-variant classes were stripped from the generated `components/ui` files** by
+  script, so the exit-criteria grep finds nothing anywhere under `src`.
+- **The logical-classes check is a Vitest spec** (`src/test/logical-classes.test.ts`) and
+  excludes `components/ui` for the physical half: one pair remains there, on the sidebar
+  rail, keyed on a physical side on purpose. The same spec fails on a dark variant or
+  token block, with no exclusion.
+- **The bundler reads `@athlete/contracts` from source** (a Vite alias). Its built output
+  is CommonJS for the API; bundling that pulled in a second, un-tree-shakeable copy of
+  Zod (870 kB main chunk, 390 kB with the alias). Types still come from the built
+  declarations.
+- **`apps/web` is on Vitest 5**; the API stays on 3. Vitest 3 is not typed against
+  Vite 8, which left `expect` untyped in the web tests.
+- **Compose: `web` is unprivileged nginx on `:8080` (`WEB_PORT`)**, and the API's
+  `APP_BASE_URL` is now that origin. `smoke.sh` still calls the API directly and states
+  the web origin; the README's curl example was changed to match. A browser pointed at
+  the API's own port is now refused on state-changing requests.
+- **Six web boundary rules, not the four listed above.** The four left `lib` free to
+  import `components`, `components` free to import `features` and `routes`, and
+  `features` free to import `routes`. `web-lib-stays-below` now covers `components`, and
+  `web-components-stay-below` and `web-features-stay-below-routes` were added, so the
+  whole direction (`routes` > `features` > `components` > `lib`) is checked.
+- **`seed-dev.sh` creates a third account, `both@alpha.test`** (coach in Alpha,
+  administrator of Beta), moved there from `smoke.sh`: the switcher needs someone with
+  two academies, for the owner's review and for the end-to-end test.
+- **End-to-end beyond the one spec the plan lists.** `e2e/shell.spec.ts` covers the
+  academy switch, the account page, and sign-in and the athletes list at 1280px and
+  390px (screenshots, no horizontal scroll). A setup project signs the seeded accounts
+  in over HTTP and adds 30 athletes so the list has a second page. better-auth's sign-in
+  rate limit (three per ten seconds, on because the stack runs as production) is waited
+  out rather than disabled.
+- **`smoke.sh` must run before the end-to-end tests on one stack** (the order of the exit
+  criteria). The end-to-end setup adds athletes to Alpha Academy, and three smoke checks
+  count Alpha's athletes from a fresh seed. CI runs them in separate jobs.
+- **Switching academy keeps the `/me` query and remounts the page.** Found by the
+  end-to-end test: clearing the whole cache under the mounted shell left the previous
+  academy's result on screen. `resetSession` takes `{ keep }` for this one case, the
+  switch then overwrites `/me`, and the shell keys the page by the active academy.
+- **The `_app` guard calls `GET /me` through the SDK and seeds the query cache**, instead
+  of fetching through the cache, so a signed-out visit is one redirect and not also a
+  global 401. `/sign-in` does not redirect a visitor who is already signed in.
+- **The error mapper learns what a 401 means by injection** (`configureErrorMapper`,
+  wired in `main.tsx`), because `lib` may not import the router. It also gives 429 its
+  own toast and returns what it did. The conflict branch calls an `onConflict` handler;
+  the dialog itself is phase 4.
+- **Changing password signs out the account's other sessions** (`revokeOtherSessions`).
+- **Boundaries run as a second dependency-cruiser pass** (`.dependency-cruiser.web.cjs`,
+  `tsconfig.depcruise.web.json`): one rule set, but the SPA resolves differently from the
+  API (bundler resolution, the `@/` alias, TSX). The generated client is excluded from
+  that pass because hey-api's own files import each other's types in a cycle.
+- **The React lint config has the hook rules and the promise rules only**; no
+  `eslint-plugin-react` or refresh plugin. `only-throw-error` allows the router's
+  `redirect()` and `notFound()` values in `apps/web`.
+- **CI's `verify` job also runs** the web unit tests and the web build, and fails if the
+  committed `routeTree.gen.ts` is not the one the build produces.
+- **Files the plan did not name:** `lib/auth/session-actions.ts`, `lib/authz/use-me.ts`,
+  `lib/list-search.ts`, `components/{app-shell,academy-switcher,nav-user}.tsx`,
+  `components/navigation.ts`, `src/router.tsx`, `apps/web/Dockerfile`,
+  `apps/web/nginx.conf`.
+- **Docs corrected in this phase** (sentences it made false): `README.md` (running it,
+  sign-in origin, "not built", layout, CI diagram, verified state), `docs/01` §6,
+  `docs/06` (next steps), `tooling/eslint-config/README.md`, `apps/web/README.md`.
 
 ---
 
