@@ -37,7 +37,7 @@ export class PolicyService {
   }
 
   async assertCanAccessAthlete(athleteId: string): Promise<void> {
-    const { roles, userId } = requestContext.require();
+    const { roles } = requestContext.require();
 
     // Administrators are scoped by RLS to their own academy; within it they see all.
     if (roles.includes('academy_admin') || roles.includes('platform_admin')) return;

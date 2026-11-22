@@ -8,12 +8,18 @@
   "scripts": {
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint && eslint --max-warnings 0 .",
     "test": "turbo run test",
     "test:integration": "pnpm --filter @athlete/api test:integration",
     "lint:boundaries": "depcruise apps/api/src packages --config .dependency-cruiser.cjs"
   },
   "devDependencies": {
+    "@athlete/eslint-config": "workspace:*",
+    "@commitlint/cli": "^21.0.2",
+    "@commitlint/config-conventional": "^21.0.2",
     "dependency-cruiser": "^16.10.0",
+    "eslint": "^9.39.1",
+    "lefthook": "^2.1.9",
     "turbo": "^2.5.5",
     "typescript": "^5.9.2"
   }

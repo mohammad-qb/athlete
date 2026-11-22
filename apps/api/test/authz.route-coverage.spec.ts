@@ -47,7 +47,7 @@ function routeHandlers(controller: Ctor): string[] {
 }
 
 describe('authorization route coverage', () => {
-  const controllers = collectControllers(AppModule as unknown as Ctor);
+  const controllers = collectControllers(AppModule);
 
   it('discovers the controllers in the module graph', () => {
     expect(controllers.length).toBeGreaterThan(0);

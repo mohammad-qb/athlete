@@ -33,6 +33,13 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      # Type-aware lint, and the reason it is a separate gate from typecheck: an
+      # authorization assertion whose `await` has been deleted type-checks cleanly and
+      # returns 200, so only `no-floating-promises` catches it. See
+      # tooling/eslint-config/nest.js for the full argument.
+      - name: Lint
+        run: pnpm run lint
+
       # The architecture fitness check. A violated layer boundary fails the build.
       - name: Architecture boundaries
         run: pnpm run lint:boundaries

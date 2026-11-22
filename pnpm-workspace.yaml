@@ -1,12 +1,16 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+  - 'tooling/*'
 
 # esbuild (vitest) and the Docker transport used by Testcontainers need their install
 # scripts. Everything else stays script-free by default, which is the point of the
 # allowlist: a new dependency cannot quietly run code at install time.
 allowBuilds:
   esbuild: true
+  # lefthook's postinstall wires the git hooks; without it `pnpm install` leaves the
+  # repository with hook configuration that never runs.
+  lefthook: true
   protobufjs: true
   ssh2: true
   cpu-features: true

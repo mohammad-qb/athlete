@@ -287,6 +287,7 @@ pnpm install
 pnpm --filter @athlete/config --filter @athlete/contracts run build
 
 pnpm run typecheck          # TypeScript across the workspace
+pnpm run lint               # type-aware ESLint; a dropped `await` is a build failure
 pnpm run lint:boundaries    # architecture fitness rules
 pnpm --filter @athlete/api run test              # unit — no Docker needed
 pnpm --filter @athlete/api run test:integration  # real Postgres via Testcontainers
@@ -319,13 +320,14 @@ Run on macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2, `postgres:17-alpine`:
 
 ```
 pnpm run typecheck                          ✓ no errors (5 tasks)
-pnpm run lint:boundaries                    ✓ no violations (39 modules, 74 dependencies)
+pnpm run lint                               ✓ no errors (6 tasks, type-aware)
+pnpm run lint:boundaries                    ✓ no violations (50 modules, 98 dependencies)
 pnpm run build                              ✓ 3 tasks
-test (unit)                                 ✓ 10 passed  (2 files)
+test (unit)                                 ✓ 47 passed  (4 files)
 test:integration (real Postgres)            ✓ 17 passed  (4 files)
 docker build -f apps/api/Dockerfile         ✓ image builds
 docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql
-./scripts/smoke.sh (containerised stack)    ✓ 11/11 checks passed
+./scripts/smoke.sh (containerised stack)    ✓ 16/16 checks passed
 ```
 
 The smoke run, verbatim — note check 4, which is the same request as check 3 with a
@@ -340,23 +342,49 @@ Tenant isolation over HTTP (identical request, different academy)
   PASS  academy B sees an empty list                 []
   PASS  A's athlete is invisible to B                404
 Optimistic concurrency
-  PASS  read returns an ETag                         0
+  PASS  read returns an ETag                         integer
   PASS  write with current ETag wins                 200
   PASS  stale write is refused                       409
   PASS  write without If-Match refused               400
+Error contract (one shape for every failure, not just a status code)
+  PASS  conflict is typed CONFLICT                   CONFLICT
+  PASS  conflict carries a stable code               stale_write
+  PASS  a refusal is typed NOT_FOUND                 NOT_FOUND
+  PASS  no token is typed UNAUTHORIZED               UNAUTHORIZED
 Validation
   PASS  malformed body is refused                    400
   PASS  malformed id is refused                      400
+  PASS  validation is typed BAD_REQUEST              BAD_REQUEST
 ```
 
-The 409 body, because a conflict should tell the caller how to recover:
+Every failure has the same shape, because a client should be able to write one error
+handler. The 409 body, which also has to tell the caller how to recover:
 
 ```json
 {
-  "error": "stale_write",
-  "message": "Athlete was modified by someone else since you loaded it (your version: 0). Re-read the resource and reapply your change."
+  "statusCode": 409,
+  "name": "ApiError",
+  "message": "Athlete was modified by someone else since you loaded it",
+  "type": "CONFLICT",
+  "code": "stale_write",
+  "explanation": "Re-read the resource and reapply your change. A conflict here means the write was refused, not partially applied.",
+  "meta": { "expectedVersion": 0 }
 }
 ```
+
+`type` is the stable category to switch on, `code` identifies the specific failure,
+`meta` is machine-readable and `explanation` is for a human. What is **not** in any
+body is the `cause` chain: an unexpected failure is redacted to `"Internal server
+error"` and the original survives only in the log. Provoking one deliberately — an
+unparseable `?at` reaching the driver — the client gets:
+
+```json
+{ "statusCode": 500, "name": "ApiError", "message": "Internal server error", "type": "INTERNAL" }
+```
+
+while the log line carries the full failing SQL, its bound parameters and the tenant
+id. That asymmetry is the point of keeping `cause` unserialisable: a filter can attach
+a raw `pg` error without anyone having to judge whether it leaks.
 
 **Terraform has not been applied or validated** — no Azure subscription and no
 Terraform binary were available. It is a reviewed design artifact; expect
@@ -376,7 +404,9 @@ Each one exists to make a specific claim falsifiable.
 | `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted; a replayed offline submission inserts nothing | "maintaining historical records when athletes change teams" |
 | `concurrency.optimistic-lock.integration` | Two writers hold version 0; the first wins, the second affects **zero rows** → 409, and the first writer's change survives; no row lock is held across user think-time | "two users update the same record simultaneously" |
 | `authz.route-coverage` | Walks the real module graph and fails if **any** route lacks `@Authorize` or `@Public`; the public allowlist is asserted explicitly | "secure access based on user roles and responsibilities" |
-| `optimistic-concurrency.unit` | `If-Match`/`ETag` parsing, including malformed and weak validators | — |
+| `optimistic-concurrency.unit` | `If-Match`/`ETag` parsing, including malformed and weak validators; a stale write is a 409 carrying the version the caller held | "two users update the same record simultaneously" |
+| `api-error.unit` | Every error type maps to the status and log severity the contract promises, the type list is exhaustive (adding one without a status fails here), and `toJSON` cannot serialise `cause` | — |
+| `error-responder.unit` | One log line per failure at its own severity; `meta` logged for 5xx and withheld for 4xx; an unexpected error is redacted to `"Internal server error"` while the original reaches the log; an `http-errors` 4xx keeps its status only when it marked itself exposable; a response already begun is closed rather than crashed | — |
 
 ### Three findings from actually running this
 
@@ -414,7 +444,7 @@ and path parameters validate against that same primitive rather than Nest's
 of `packages/contracts` in the first place.
 
 **Why this matters beyond the bugs:** findings 2 and 3 were invisible to 17 passing
-integration tests and caught by an 11-line smoke script in under a minute. Database
+integration tests and caught by the smoke script in under a minute. Database
 tests and wiring tests catch different classes of defect. Keeping both is cheap; relying
 on either alone is how an API that returns 401 to everyone passes CI.
 
@@ -460,17 +490,20 @@ Scope choices, each one a decision rather than an omission:
 apps/
   api/                  NestJS — the one deployable
     drizzle/            hand-written SQL migrations (schema, then RLS)
-    src/common/         tenancy, authz, HTTP concerns
+    src/common/         tenancy, authz, errors, HTTP concerns
     src/modules/        athletes · teams · sessions · auth
     test/               unit + Testcontainers integration
   web/                  SPA build target (deliberately minimal)
 packages/
   contracts/            Zod schemas — single source of truth
   config/               fail-fast env validation
+tooling/
+  eslint-config/        the type-aware lint gate, and why it is one
 infra/terraform/        Azure UAE North / UAE Central
 docs/                   the written proposal (A–E of the brief)
 scripts/                smoke check, demo seed, dev token minting
 apps/api/Dockerfile     multi-stage, non-root, prod deps only
 docker-compose.yml      local dev AND the single-server deployment answer
 .dependency-cruiser.cjs architecture fitness rules
+lefthook.yml            pre-commit: the same lint and typecheck gates CI runs
 ```
