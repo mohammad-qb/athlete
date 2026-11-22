@@ -18,7 +18,7 @@ sync client, no OpenAPI client generation beyond the document itself, and no mov
 
 | Phase | Name | Status |
 |---|---|---|
-| 1 | Repo guardrails + error contract | not started |
+| 1 | Repo guardrails + error contract | done |
 | 2 | Authorization model (CASL + SQL compiler) | not started |
 | 3 | Enforce scoping (the live hole) | not started |
 | 4 | Database privileges + fact immutability | not started |
@@ -26,8 +26,8 @@ sync client, no OpenAPI client generation beyond the document itself, and no mov
 | 6 | Terraform restructure + secrets | not started |
 | 7 | Docs, ADRs, verified state | not started |
 
-**Current phase:** none — not started.
-**Recommended next phase:** 1.
+**Current phase:** 1 — done.
+**Recommended next phase:** 2.
 
 Phase 6 touches no application code and may run in parallel with 2–5 if two sessions are
 available; every other phase depends on the one before it.
@@ -165,7 +165,12 @@ import that habit.
 4. `PATCH /athletes/:id` with a misspelled field validates to `{}` and returns **200 with a
    bumped ETag having changed nothing**, invalidating every other client's ETag. Phase 5.
 5. A dropped `await` on a policy assertion silently skips authorization; no test would catch it.
-   Phase 1 (`no-floating-promises`).
+   Phase 1 (`no-floating-promises`) — **closed**.
+6. `GET /teams/:id/roster?at=<garbage>` builds `new Date('garbage')` and hands an Invalid
+   Date to the driver, so an unvalidated query parameter produces a **500**. Found while
+   verifying phase 1's catch-all filter. The redaction holds (the client learns nothing,
+   the log carries the SQL), but a client error is being reported as a server fault.
+   Phase 5 — it is the query-schema half of defect 4, and `@Validate({ query })` closes it.
 
 ---
 
@@ -207,13 +212,13 @@ later phase lands on a repo where authorization mistakes and unclassified failur
 
 **Tasks.**
 
-- [ ] `git init` + baseline commit before edits
-- [ ] `tooling/eslint-config` package, root config, per-package `lint` scripts, violations fixed
-- [ ] lefthook + commitlint
-- [ ] `ApiError` + `ApiErrorType` + unit tests for the status/logLevel/`toJSON` contract
-- [ ] `ErrorResponder` + three filters + unit tests for redaction and `headersSent`
-- [ ] `staleWrite` → `CONFLICT`; smoke script and README transcript updated
-- [ ] CI: a lint job beside `lint:boundaries`
+- [x] `git init` + baseline commit before edits — already present (`47f8b9c`), see Deviations
+- [x] `tooling/eslint-config` package, root config, per-package `lint` scripts, violations fixed
+- [x] lefthook + commitlint
+- [x] `ApiError` + `ApiErrorType` + unit tests for the status/logLevel/`toJSON` contract
+- [x] `ErrorResponder` + three filters + unit tests for redaction and `headersSent`
+- [x] `staleWrite` → `CONFLICT`; smoke script and README transcript updated
+- [x] CI: a lint job beside `lint:boundaries`
 
 **Exit criteria.**
 
@@ -234,8 +239,83 @@ docker compose up -d --build && docker compose run --rm migrate && ./scripts/smo
   appears only in the log.
 - `smoke.sh` passes with the new 409 and 400 bodies; the README block matches reality.
 
+**Verified on 2026-11-22** (macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2,
+`postgres:17-alpine`): typecheck 5 tasks clean; `lint` 6 tasks clean; `lint:boundaries`
+no violations (50 modules, 98 dependencies); unit 52 passed (4 files); integration 17
+passed (4 files); `docker compose run --rm migrate` → `Applied: 0000_init.sql,
+0001_rls.sql`; `smoke.sh` 16/16.
+
+Both negative checks were run rather than assumed. Removing the `await` from
+`assertCanAccessAthlete` in `AthletesService.update` fails `pnpm run lint`
+(`no-floating-promises`) and **passes `pnpm run typecheck`** — which is the entire
+argument for the type-aware tier, now demonstrated rather than claimed. A real
+unclassified failure (defect 6 below) returned
+`{"statusCode":500,"message":"Internal server error","type":"INTERNAL"}` while the log
+line carried the full failing SQL, its bound parameters and the tenant id.
+
 ### Deviations
-_(none yet)_
+
+- **`git init` was already done.** The repo was on branch `dev` at `47f8b9c`
+  ("chore: baseline — athlete platform technical proposal") with a clean tree, so the
+  baseline commit this phase asked for already existed. No second baseline was created.
+- **Each package carries its own `eslint.config.mjs`.** The plan said "root
+  `eslint.config.mjs` consumes it". With `projectService`, `tsconfigRootDir` must point
+  at the package that owns the tsconfig, so a single root config would have to
+  re-declare per-directory blocks and would silently resolve the wrong project as
+  packages are added. The root config now covers root-level JS only, and
+  `pnpm run lint` is `turbo run lint && eslint --max-warnings 0 .` so both passes run.
+- **`require-await` surfaced nothing.** typescript-eslint's version of the rule permits
+  an `async` function that returns a thenable, so the repository methods that `return
+  tx.select()...` without awaiting are not violations. Repo-wide the three rules found
+  exactly two real defects, both fixed: an unused `userId` destructured in
+  `policy.service.ts`, and an unnecessary type assertion in the route-coverage spec.
+- **`parseIfMatch` was converted to `ApiError` too.** The plan named only `staleWrite`.
+  Leaving its sibling in the same file throwing `BadRequestException` would have left
+  one file speaking two error dialects. Both now carry a `code`
+  (`if_match_required`, `if_match_malformed`, `stale_write`).
+- **`ZodValidationPipe` gained an explicit `message`.** Nest degrades an exception
+  payload without one to the class name spelled out, so the new contract was publishing
+  `"message": "Bad Request Exception"` for every validation failure. One line, and
+  phase 5 replaces the pipe outright — but the body should say something true until then.
+- **`ErrorResponder` logs through Nest's `Logger`, not pino + Sentry.** The reference
+  implementation injects a pino logger and captures 5xx in Sentry. Neither exists here
+  and adding them is not this phase. The responder emits one line per failure with the
+  structured fields appended as JSON, which keeps the `event: 'http.request.failed'`
+  contract greppable; swapping in a structured logger later touches one method.
+- **No prettier.** The reference config layers `eslint-config-prettier`. This repo has
+  no formatter, and introducing one would be a repo-wide diff the plan did not ask for.
+- **Fixed a pre-existing smoke bug.** `check "read returns an ETag" 0 "$ETAG"` asserted
+  the first read returns version **0**, which only holds against a virgin volume; the
+  second run of the script failed. It now asserts the shape (`integer`), so the check
+  tests the behaviour rather than the fixture. Found by running `smoke.sh` twice.
+- **Smoke now asserts bodies, not only statuses.** Four checks read `type` and `code`
+  out of the error body, because that is where the contract actually lives. 11 checks
+  became 16.
+- **Open follow-up, decided deliberately:** every 5xx is redacted to the one blanket
+  message, so a `503` says `"Internal server error"` rather than signalling "retry". It
+  stays blanket because nothing throws a 5xx `HttpException` today. The first endpoint
+  that wants an honest 503 needs a 5xx-safe message allowlist plus `Retry-After`, not a
+  loosening of the redaction — the status code carries the retry signal until then.
+- **The log walks the whole `cause` chain**, bounded at 5 and cycle-guarded, rather than
+  serialising its first step. This was a real loss, not a tidiness point: Drizzle wraps
+  every database failure in a `DrizzleQueryError` carrying the SQL and parameters and
+  attaches the `pg` error as *its* cause, and `captureStackTrace` means the driver's
+  message appears in no stack either. Verified against the live stack — the same request
+  that previously logged only `Failed query: select ...` now also logs
+  `error: invalid input syntax for type timestamp with time zone`, which is the only
+  step that says *why*. At 4xx severities no stack is logged at all, so one step there
+  meant no diagnosis whatsoever.
+- **`engines.node >= 22.12.0` is advisory, and stays that way — tested, not assumed.**
+  pnpm 11.21.0 only *warns* on a root `engines` mismatch and exits 0; `engine-strict=true`
+  in `.npmrc` does not change that, because it governs dependencies' engines rather than
+  the project's own (verified against a throwaway package declaring `node >=99`). So no
+  `.npmrc` was added: it would have been configuration whose comment claimed an
+  enforcement it does not perform. CI's `node-version: 22` and the Dockerfile's
+  `node:22-alpine` both resolve to the newest 22.x, which cannot be below 22.12.0, and
+  `setup-node` has no way to say "latest 22.x, at least 22.12" — a range like `>=22.12`
+  would also match Node 24 and silently move CI off the target major. Enforcing the floor
+  for real would take a hand-rolled `preinstall` semver guard, which does not pay for
+  itself against an 11-patch window of Node 22 that ages out on its own.
 
 ---
 
@@ -452,6 +532,16 @@ Closes defect 4.
   `@Validate` is refused and that parsed values reach the handler. The manifest proves a
   declaration exists; only this proves validation ran.
 - Smoke: `PATCH` with a misspelled field is a 400 and the ETag does **not** move.
+- Query parameters are in scope, not just bodies: `?at=<garbage>` on the roster route is
+  defect 6 today (a 500 from an Invalid Date reaching the driver). `rosterAt`'s `at` must
+  parse through a declared query schema.
+- **Carried over from phase 1:** `HttpExceptionFilter.extractMeta()` forwards a 4xx
+  exception's whole payload minus Nest's `message`/`error`/`statusCode`, so a guard or
+  third-party exception that attaches internal state to a 4xx body publishes it. Left
+  open in phase 1 on purpose: a key allowlist would be brittle, it is not a regression
+  (Nest's own default filter publishes the same payload), and this phase deletes
+  `ZodValidationPipe` and reshapes validation `meta` into `meta.fields` anyway. Decide it
+  here, when the 4xx `meta` shape is being defined rather than guessed at.
 
 **Tasks.**
 

@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { CommonModule } from './common/common.module';
 import { AuthorizationGuard } from './common/authz/authorization.guard';
 import { TenantTransactionInterceptor } from './common/tenancy/tenant-transaction.interceptor';
@@ -9,6 +9,10 @@ import { AthletesModule } from './modules/athletes/athletes.module';
 import { TeamsModule } from './modules/teams/teams.module';
 import { SessionsModule } from './modules/sessions/sessions.module';
 import { HealthController } from './health/health.controller';
+import { ErrorResponder } from './common/errors/error-responder';
+import { AllExceptionsFilter } from './common/errors/filters/all-exceptions.filter';
+import { ApiErrorFilter } from './common/errors/filters/api-error.filter';
+import { HttpExceptionFilter } from './common/errors/filters/http-exception.filter';
 
 @Module({
   imports: [CommonModule, AuthModule, AthletesModule, TeamsModule, SessionsModule],
@@ -20,6 +24,16 @@ import { HealthController } from './health/health.controller';
     { provide: APP_GUARD, useClass: AuthorizationGuard },
     // Every authenticated request runs inside a tenant-scoped transaction.
     { provide: APP_INTERCEPTOR, useClass: TenantTransactionInterceptor },
+
+    // One error contract, three normalisers. Nest REVERSES the global filter list and
+    // takes the first @Catch metadata match, so the LAST registered filter is tried
+    // FIRST: the catch-all goes first and the most specific goes last. All three live
+    // in this one array precisely so that order is visible and deterministic -- an
+    // APP_FILTER registered in a feature module would silently reorder them.
+    ErrorResponder,
+    { provide: APP_FILTER, useClass: AllExceptionsFilter },
+    { provide: APP_FILTER, useClass: HttpExceptionFilter },
+    { provide: APP_FILTER, useClass: ApiErrorFilter },
   ],
 })
 export class AppModule {}

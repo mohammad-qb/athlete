@@ -1,0 +1,32 @@
+# Git hooks, managed by lefthook (https://lefthook.dev).
+#
+# Wired on `pnpm install` (lefthook's own postinstall runs `lefthook install`, which is
+# why it appears in the allowBuilds list in pnpm-workspace.yaml -- see the note there
+# about install scripts being opt-in). Re-wire by hand with `pnpm exec lefthook install`.
+# Bypass a single commit with `LEFTHOOK=0 git commit ...`, sparingly and with a reason.
+#
+# POLICY: hooks verify, they never write. No job here may touch the index or the working
+# tree. A commit must record exactly what was reviewed, so formatting and codemods are
+# edit-time concerns, not commit-time ones.
+#
+# The jobs are the same gates CI runs, which is the point: the hook exists to shorten
+# the feedback loop, not to enforce something CI does not. If a hook passes and CI
+# fails, the hook is wrong.
+
+pre-commit:
+  parallel: true
+  jobs:
+    # Type-aware lint. This is the gate that makes a dropped `await` on an
+    # authorization assertion a failure rather than a silent bypass -- see
+    # tooling/eslint-config/nest.js. Runs over whole packages rather than staged files
+    # because type-aware rules need the project, not a file list.
+    - name: lint
+      run: pnpm run lint
+
+    - name: typecheck
+      run: pnpm run typecheck
+
+commit-msg:
+  jobs:
+    - name: commitlint
+      run: pnpm exec commitlint --edit {1}

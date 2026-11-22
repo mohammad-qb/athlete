@@ -33,6 +33,20 @@ check() { # check <label> <expected> <actual>
   fi
 }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+etag_shape() {
+  case "$1" in
+    '') echo missing ;;
+    *[!0-9]*) echo "not-an-integer: $1" ;;
+    *) echo integer ;;
+  esac
+}
+# One field out of an error body. The error contract is a single shape for every
+# failure (apps/api/src/common/errors), so a smoke check can assert the body and not
+# only the status -- which is where the contract actually lives.
+field() { # field <json-path-key> <curl args...>
+  local key="$1"; shift
+  curl -s "$@" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s)[process.argv[1]]))}catch{process.stdout.write("<unparseable>")}})' "$key"
+}
 
 echo "Seeding demo data..."
 docker compose exec -T postgres psql -U postgres -d athlete -q < scripts/seed-demo.sql > /dev/null
@@ -57,15 +71,28 @@ check "A's athlete is invisible to B"  404  "$(code -H "$B" "$BASE/athletes/$ATH
 echo
 echo "Optimistic concurrency"
 ETAG=$(curl -s -D- -o /dev/null -H "$A" "$BASE/athletes/$ATHLETE" | awk 'tolower($1)=="etag:"{print $2}' | tr -d '\r"')
-check "read returns an ETag"           0    "$ETAG"
+# Asserts the SHAPE, not the value. The version is whatever the row is at, and this
+# script must be re-runnable against a database it has already written to -- an earlier
+# assertion that the first read returns version 0 passed only against a virgin volume
+# and failed on the second run, which is a check that tests the fixture rather than the
+# behaviour.
+check "read returns an ETag"           integer "$(etag_shape "$ETAG")"
 check "write with current ETag wins"   200  "$(code -X PATCH -H "$A" -H "If-Match: \"$ETAG\"" -H "$JSON" -d '{"lastName":"Falcon-Ali"}' "$BASE/athletes/$ATHLETE")"
 check "stale write is refused"         409  "$(code -X PATCH -H "$A" -H "If-Match: \"$ETAG\"" -H "$JSON" -d '{"lastName":"Falcon-Omar"}' "$BASE/athletes/$ATHLETE")"
 check "write without If-Match refused" 400  "$(code -X PATCH -H "$A" -H "$JSON" -d '{"lastName":"Y"}' "$BASE/athletes/$ATHLETE")"
 
 echo
+echo "Error contract (one shape for every failure, not just a status code)"
+check "conflict is typed CONFLICT"     CONFLICT       "$(field type -X PATCH -H "$A" -H "If-Match: \"$ETAG\"" -H "$JSON" -d '{"lastName":"Falcon-Omar"}' "$BASE/athletes/$ATHLETE")"
+check "conflict carries a stable code" stale_write    "$(field code -X PATCH -H "$A" -H "If-Match: \"$ETAG\"" -H "$JSON" -d '{"lastName":"Falcon-Omar"}' "$BASE/athletes/$ATHLETE")"
+check "a refusal is typed NOT_FOUND"   NOT_FOUND      "$(field type -H "$B" "$BASE/athletes/$ATHLETE")"
+check "no token is typed UNAUTHORIZED" UNAUTHORIZED   "$(field type "$BASE/athletes")"
+
+echo
 echo "Validation"
 check "malformed body is refused"      400  "$(code -X POST -H "$A" -H "$JSON" -d '{"firstName":"","lastName":"Z","dateOfBirth":"nope"}' "$BASE/athletes")"
 check "malformed id is refused"        400  "$(code -H "$A" "$BASE/athletes/not-a-uuid")"
+check "validation is typed BAD_REQUEST" BAD_REQUEST "$(field type -H "$A" "$BASE/athletes/not-a-uuid")"
 
 echo
 if [ $fail -eq 0 ]; then
