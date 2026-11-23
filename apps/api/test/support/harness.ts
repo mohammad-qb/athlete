@@ -1,20 +1,34 @@
 import { randomUUID } from 'node:crypto';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { Pool } from 'pg';
-import { runMigrations } from '../../src/db/migrate';
+import { provisionRoleLogin, runMigrations } from '../../src/db/migrate';
 
 export interface TestDatabase {
   container: StartedPostgreSqlContainer;
   /** Connected as the APPLICATION role, so RLS actually applies. See note below. */
   pool: Pool;
-  /** Superuser connection, used only to provision the app role. Never used in assertions. */
+  /**
+   * Superuser connection. Used to provision what the application role is not allowed to
+   * create -- users, academies, role grants -- and, in the privilege tests, to show what
+   * the OWNER is still refused. Never the subject of an isolation assertion.
+   */
   adminPool: Pool;
+  /** Connection string for the application role. */
   url: string;
+  /**
+   * Connection string for `athlete_auth`, the role better-auth connects as: identity
+   * and sessions, and nothing tenant-owned.
+   */
+  authUrl: string;
+  /** Connection string for the superuser/owner: the one the API must refuse to start on. */
+  adminUrl: string;
   stop: () => Promise<void>;
 }
 
 const APP_ROLE = 'athlete_app';
 const APP_ROLE_PASSWORD = 'app-role-test-password';
+const AUTH_ROLE = 'athlete_auth';
+const AUTH_ROLE_PASSWORD = 'auth-role-test-password';
 
 /**
  * Real Postgres, real migrations. These guarantees live in the database -- RLS
@@ -42,11 +56,12 @@ export async function startTestDatabase(): Promise<TestDatabase> {
   // The migration creates athlete_app as NOLOGIN, because production authenticates it
   // with a credential from Key Vault rather than one committed to a repository. Tests
   // grant it a local password so they can connect AS the application role.
-  await adminPool.query(
-    `alter role ${APP_ROLE} with login password '${APP_ROLE_PASSWORD}'`,
-  );
+  await provisionRoleLogin(adminUrl, APP_ROLE, APP_ROLE_PASSWORD);
+  await provisionRoleLogin(adminUrl, AUTH_ROLE, AUTH_ROLE_PASSWORD);
 
-  const url = `postgres://${APP_ROLE}:${APP_ROLE_PASSWORD}@${container.getHost()}:${container.getPort()}/${container.getDatabase()}`;
+  const address = `${container.getHost()}:${container.getPort()}/${container.getDatabase()}`;
+  const url = `postgres://${APP_ROLE}:${APP_ROLE_PASSWORD}@${address}`;
+  const authUrl = `postgres://${AUTH_ROLE}:${AUTH_ROLE_PASSWORD}@${address}`;
   const pool = new Pool({ connectionString: url, max: 5 });
 
   return {
@@ -54,6 +69,8 @@ export async function startTestDatabase(): Promise<TestDatabase> {
     pool,
     adminPool,
     url,
+    authUrl,
+    adminUrl,
     stop: async () => {
       await pool.end();
       await adminPool.end();
@@ -112,29 +129,35 @@ export interface SeededAcademy {
   coachUserId: string;
 }
 
-export async function seedAcademy(pool: Pool, name: string): Promise<SeededAcademy> {
+/**
+ * Onboards an academy with an administrator and a coach.
+ *
+ * Runs as the superuser because the application role cannot do any of it: `athlete_app`
+ * holds SELECT only on `academies` and `user_academy_roles`, and nothing on `users`
+ * (0002_grants.sql). These users have no credential: a test that signs in creates its
+ * own through the operator CLI's `createUser`.
+ * Onboarding is a platform operation, and the fixture is honest about that.
+ */
+export async function seedAcademy(db: TestDatabase, name: string): Promise<SeededAcademy> {
   const academyId = randomUUID();
+  const pool = db.adminPool;
 
-  // `users` is intentionally not tenant-scoped (one person may work at several
-  // academies), so it needs no tenant context.
   const admin = await pool.query(
-    `insert into users (email, password_hash, full_name) values ($1, 'x', $2) returning id`,
+    `insert into users (email, full_name) values ($1, $2) returning id`,
     [`admin+${academyId}@example.test`, `${name} Admin`],
   );
   const coach = await pool.query(
-    `insert into users (email, password_hash, full_name) values ($1, 'x', $2) returning id`,
+    `insert into users (email, full_name) values ($1, $2) returning id`,
     [`coach+${academyId}@example.test`, `${name} Coach`],
   );
   const adminUserId = admin.rows[0].id as string;
   const coachUserId = coach.rows[0].id as string;
 
-  await asAcademy(pool, academyId, async (client) => {
-    await client.query(`insert into academies (id, name) values ($1, $2)`, [academyId, name]);
-    await client.query(
-      `insert into user_academy_roles (academy_id, user_id, role) values ($1, $2, 'academy_admin'), ($1, $3, 'coach')`,
-      [academyId, adminUserId, coachUserId],
-    );
-  });
+  await pool.query(`insert into academies (id, name) values ($1, $2)`, [academyId, name]);
+  await pool.query(
+    `insert into user_academy_roles (academy_id, user_id, role) values ($1, $2, 'academy_admin'), ($1, $3, 'coach')`,
+    [academyId, adminUserId, coachUserId],
+  );
 
   return { academyId, adminUserId, coachUserId };
 }
@@ -204,4 +227,60 @@ export async function assignCoach(
       [academyId, teamId, coachUserId, validFrom, validTo],
     );
   });
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** An ISO instant `days` before now. Fixtures are relative so they do not rot with the calendar. */
+export const daysAgo = (days: number): string => new Date(Date.now() - days * DAY_MS).toISOString();
+
+export interface TwoTeamAcademy extends SeededAcademy {
+  /** The team `coachUserId` coaches today. */
+  teamA: string;
+  /** The team `coachUserId` coached until a week ago, and nobody coaches now. */
+  teamB: string;
+  athleteOnA: string;
+  athleteOnB: string;
+  /** A coach whose ONLY assignment (team B) closed a week ago. */
+  lapsedCoachUserId: string;
+}
+
+/**
+ * Two teams in one academy -- the smallest fixture in which "which rows?" has more than
+ * one answer inside a tenant, which is what resource scoping is about and what the
+ * tenant-isolation fixtures cannot show.
+ *
+ *   team A: athleteOnA.  `coachUserId` assigned 90 days ago, still open.
+ *   team B: athleteOnB.  `coachUserId` AND `lapsedCoachUserId` assigned 90 days ago,
+ *                        both closed 7 days ago.
+ *
+ * So the same coach has a current team and a former one, and the lapsed coach has
+ * nothing current at all: the two cases a temporal assignment has to get right.
+ */
+export async function seedTwoTeamAcademy(db: TestDatabase, name: string): Promise<TwoTeamAcademy> {
+  const academy = await seedAcademy(db, name);
+  const { academyId, coachUserId } = academy;
+
+  const lapsed = await db.adminPool.query(
+    `insert into users (email, full_name) values ($1, $2) returning id`,
+    [`lapsed+${academyId}@example.test`, `${name} Former Coach`],
+  );
+  const lapsedCoachUserId = lapsed.rows[0].id as string;
+  await db.adminPool.query(
+    `insert into user_academy_roles (academy_id, user_id, role) values ($1, $2, 'coach')`,
+    [academyId, lapsedCoachUserId],
+  );
+
+  const teamA = await createTeam(db.pool, academyId, 'Team A');
+  const teamB = await createTeam(db.pool, academyId, 'Team B');
+  const athleteOnA = await createAthlete(db.pool, academyId, 'Aisha', 'OnA');
+  const athleteOnB = await createAthlete(db.pool, academyId, 'Bilal', 'OnB');
+
+  await addMembership(db.pool, academyId, teamA, athleteOnA, daysAgo(90));
+  await addMembership(db.pool, academyId, teamB, athleteOnB, daysAgo(90));
+
+  await assignCoach(db.pool, academyId, teamA, coachUserId, daysAgo(90));
+  await assignCoach(db.pool, academyId, teamB, coachUserId, daysAgo(90), daysAgo(7));
+  await assignCoach(db.pool, academyId, teamB, lapsedCoachUserId, daysAgo(90), daysAgo(7));
+
+  return { ...academy, teamA, teamB, athleteOnA, athleteOnB, lapsedCoachUserId };
 }

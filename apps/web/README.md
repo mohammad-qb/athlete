@@ -1,17 +1,242 @@
 # apps/web
 
-Build target for the SPA. **Deliberately minimal** — the brief states that frontend
-design is not being assessed, so the time went into the guarantees in `apps/api`
-instead.
+The browser application: a React + Vite **static SPA** that an `academy_admin` and a
+`coach` sign in to. One app for both roles; the menu and the landing page follow the
+permissions `GET /api/v1/me` reports for the active academy.
 
-## What this would be
+**What it does**, which is everything the API offers those two roles: sign in, sign out,
+change password, the `dashboard-01` shell with a role-aware menu and an academy
+switcher; athletes (list, add, edit with the conflict dialog); teams (list, create, the
+roster as of any day, adding an athlete, transferring one); sessions (list, schedule)
+and the **attendance register**, built for a phone: mark everyone, submit once, with the
+marks kept on the device until the API has confirmed them. An administrator lands on
+the athletes list, a coach on their sessions.
 
-- **React + Vite**, built to static files, served from Blob Storage behind Front Door.
-- API client **generated from the OpenAPI document**, which is itself generated from
-  `packages/contracts` — so a contract change is a compile error here, not a runtime bug
-  in a user's browser.
-- `ETag` captured on read and sent back as `If-Match` on write, surfacing a 409 as
-  "someone else changed this — here is their version" rather than as a generic failure.
+**What it does not do:** submit without a connection (there is no offline queue and no
+service worker), correct a recorded attendance entry (the API has no void route), or
+offer screens for an athlete, a platform administrator, users or roles. No dark theme
+and no second language.
+
+How it was built, phase by phase, deviations included:
+[`docs/plans/frontend-v1.md`](../../docs/plans/frontend-v1.md). The decisions:
+[ADR 0007](../../docs/adr/0007-generated-contract-pipeline.md) (the generated client) and
+[ADR 0008](../../docs/adr/0008-web-architecture.md) (this structure).
+
+## Running it
+
+```bash
+# 1. The whole stack in containers, on one origin (what the end-to-end tests use)
+docker compose up -d --build && docker compose run --rm migrate
+./scripts/seed-dev.sh                # admin@alpha.test, coach@alpha.test, both@alpha.test
+open http://localhost:8080           # password: athlete-dev-password
+
+# 2. Developing: the API on the host, Vite in front of it
+docker compose up -d postgres && docker compose run --rm migrate
+pnpm dev                             # the API on :3000, APP_BASE_URL=http://localhost:5173
+pnpm dev:web                         # Vite on :5173, proxying /api to :3000
+```
+
+In both, the browser sees **one origin**: nginx (compose) or the Vite dev server proxies
+`/api` to the API, as Front Door does in production. The session cookie is therefore
+first-party and httpOnly, there is no CORS, and there is no token in JavaScript. The API
+accepts state-changing requests only from the origin in its `APP_BASE_URL`, which is why
+`pnpm dev:web` goes with `pnpm dev` and not with the compose API (whose origin is `:8080`).
+
+```bash
+pnpm --filter @athlete/web run typecheck
+pnpm --filter @athlete/web run lint      # type-aware: a dropped promise is an error
+pnpm --filter @athlete/web run test      # Vitest + Testing Library, jsdom
+pnpm --filter @athlete/web run build     # dist/, the static bundle
+pnpm --filter @athlete/web run test:e2e  # Playwright, against the compose stack above
+pnpm --filter @athlete/web run generate  # the API client, from apps/api/openapi.json
+```
+
+## Structure
+
+```
+src/
+  routes/            thin: search-params schema, guard, loader; renders a feature page
+    __root.tsx         providers shared by every page
+    sign-in.tsx
+    _app.tsx           the guard: loads /me or redirects to /sign-in; draws the shell
+    _app/index.tsx     redirects to the landing page: athletes, or a coach's sessions
+    _app/athletes.index.tsx
+    _app/athletes.$athleteId.tsx
+    _app/teams.index.tsx
+    _app/teams.$teamId.tsx     ?on=YYYY-MM-DD: the day the roster is shown for
+    _app/sessions.index.tsx    ?show=all: every session, not only upcoming and recent
+    _app/sessions.$sessionId.attendance.tsx
+    _app/account.tsx
+  features/<name>/   pages/ (whole pages) + components/ (sections, small pieces) + index.ts; index.ts is the ONLY public surface
+    auth/              sign-in page, change-password page
+    athletes/          list page, add dialog, the athlete page (edit)
+    teams/             list page, create dialog, the team page (roster, add, transfer)
+    sessions/          list page, create dialog, the attendance page (the register)
+  components/        shared composites
+    app-shell, app-sidebar, site-header, academy-switcher, nav-user, navigation
+    data-table/        the one list table (server-side paging, sort, search)
+    form/              TanStack Form bound to the shadcn inputs; request validation
+                       with the contract schema; server field errors
+    conflict-dialog    the one answer to a 409 stale_write, for any edit form
+    pickers/           choosing an athlete or a team in another feature's form
+    record-state       loading and "could not load" for a single record's page
+    ui/                shadcn primitives (generated by the shadcn CLI)
+  lib/
+    api/               client.ts (ApiError), errors.ts (the error mapper), generated/
+    auth/              better-auth's browser client; sign-out and academy switch
+    authz/             can(), useCan(), <Can>, useMe()
+    drafts.ts          the attendance drafts kept in local storage
+    session-reset.ts   forget the cache and every local draft
+    list-search.ts     a list contract's query schema as a route's search validator
+    dates.ts           calendar dates and instants: showing them, and day (+ time) -> instant
+    query-client.ts
+  routeTree.gen.ts   GENERATED by the router's Vite plugin; committed
+e2e/                 Playwright specs and their setup
+```
+
+The arrows only point down: `routes → features → components → lib`. Six
+dependency-cruiser rules (`pnpm run lint:boundaries`, in
+[`.dependency-cruiser.cjs`](../../.dependency-cruiser.cjs)) make that a build failure
+rather than a convention:
+
+- a feature never imports another feature;
+- outside a feature, only its `index.ts` may be imported;
+- `components/ui` imports nothing from `features`, `routes` or `lib/api`;
+- `lib` imports nothing from `components`, `features` or `routes`;
+- `components` import nothing from `features` or `routes`;
+- a feature imports nothing from `routes`.
+
+## The patterns every screen reuses
+
+**The API client is generated, and so are the query keys.** `src/lib/api/generated` comes
+from [`apps/api/openapi.json`](../api/openapi.json), which the API generates from its
+routes and the Zod contracts. Screens use the generated query options
+(`athletesListOptions({ query })`) and never write a query key. Forms validate with the
+Zod schemas in `@athlete/contracts` directly: the same object the API validates with.
+
+```
+packages/contracts (Zod)  +  route decorators in apps/api
+        -> apps/api/openapi.json        (generated; a test fails when it is stale)
+        -> src/lib/api/generated        (generated; CI fails when it is stale)
+```
+
+After changing a route or a schema:
+
+```bash
+UPDATE_OPENAPI=1 pnpm --filter @athlete/api run test   # rewrite apps/api/openapi.json
+pnpm --filter @athlete/web run generate                # rewrite the client from it
+```
+
+**One error class, one error mapper.** Every failed call becomes an `ApiError` (`status`,
+`type`, `code`, `fields`, `meta`) in `lib/api/client.ts`, and `handleApiError` in
+`lib/api/errors.ts` is the only place that decides what a failure looks like:
+
+| Failure | What happens |
+|---|---|
+| `validation_failed`, and the caller is a form | the messages go to the matching fields |
+| 409 `stale_write`, and the caller is an editor | the conflict handler is called: the shared conflict dialog opens |
+| 401 | the cache and drafts are cleared; redirect to sign-in, remembering the page |
+| 403, 404, 429, 5xx | one consistent toast each |
+| anything else | a toast with the server's own message |
+
+Screens do not parse errors. A failed *query* shows in place of its data (the table's
+error state); a failed *mutation* is handed to the mapper by the form that owns the fields.
+
+**A form validates the request it is about to send, with the request's own schema.**
+`requestValidator(CreateTeamRequest, toRequest)` runs the contract schema over what
+`toRequest` builds from the form's values, and the submit handler sends exactly that. The
+step exists because a form's values are not always the request's shape: an empty text box
+is `''` where the request says `null`, a date input is a day where the request wants an
+instant (read in the browser's zone, `lib/dates.ts`).
+
+**An edit conflict has one answer.** Every update names the version it was made against
+(`If-Match`), taken from the record the form was *filled from*, not from whatever the
+cache holds at save time. When the API refuses it (409 `stale_write`), the mapper calls
+the form's `onConflict`, and `useConflict` + `<ConflictDialog>` (`components/conflict-dialog.tsx`)
+fetch the stored record and show only the fields in dispute, the other person's value
+beside the form's. **Keep mine** saves the form again against the fetched version, so
+what is stored is what the form shows; **Take theirs** refills the form from the stored
+record and saves nothing. An edit form gets all of it by passing its field labels. An
+update sends only the fields that differ from the version it is made against.
+
+**Rules the database enforces arrive as sentences.** An overlapping team membership is
+refused by an exclusion constraint. The API turns that into a 409 `membership_overlap`
+(and a period that ends before it starts into a 400 `membership_period_invalid`) with a
+message written for the person, and the mapper shows it as it is.
+
+**A form in one feature never imports another feature to choose a record.** The transfer
+dialog (teams) needs a team and the add-to-roster dialog needs an athlete: both use
+`components/pickers`, which search the generated list options and so offer exactly the
+records the signed-in user may see.
+
+**The browser never holds the policy.** `can(permissions, action, subject)` and `<Can>`
+read the coarse pairs `GET /me` returned and only decide whether to draw a control the
+API would refuse for certain. Which rows a pair applies to is decided by the API on every
+request and arrives as a 403 or 404.
+
+**List state lives in the URL.** A list route validates its search params with the list
+contract's own schema (`listSearch(AthleteListQuery)`), so the address bar and the API
+agree on what a page, a page size and a sortable key are; a hand-edited URL the schema
+refuses falls back to the defaults instead of an error page. `DataTable` holds no list
+state: it reads `{ page, pageSize, sort, q }` and reports the next one, so a reload, a
+shared link and the back button reproduce the view. Search is debounced; loading, empty
+and failed are states of the table, not of each screen.
+
+**The attendance register: mark everyone, submit once.** The register
+(`features/sessions`) is made of three things: the team's roster *as of the session's
+start* (who was on the team then, not who is today), the entries the API already holds
+(shown read-only), and a draft of what has been marked and not yet sent. An athlete is
+either recorded or still to mark, decided by the API's entries alone.
+
+The draft (`lib/drafts.ts`) is in local storage under one key per user, academy and
+session. Each mark holds a status, a note and a `clientRecordId` that is made once, when
+the athlete is first touched, and never replaced. That id is what the API deduplicates
+on, so the rules follow from it:
+
+| Event | The draft |
+|---|---|
+| a reload, or the tab is closed and reopened | restored, ids included |
+| a submission fails, or its answer never arrives | kept; trying again sends the same ids, so the API stores nothing twice |
+| a submission succeeds | deleted, after the entries are on screen as recorded |
+| someone else recorded part of the register (409 `attendance_already_recorded`) | kept for the athletes still unmarked; the register is reloaded |
+| sign-out, academy switch, a 401 | deleted, with every other draft (`resetSession`) |
+| local storage cannot be written | the marks live in the page, and the screen says they will not survive a reload |
+
+The submit button is enabled once every athlete still to record has a status. A
+submission needs a connection; nothing is queued.
+
+**Session reset.** Sign-out, an academy switch and a 401 all call `resetSession`: every
+cached answer and every local draft goes. On an academy switch the page is also
+remounted (the shell keys it by the active academy), so nothing fetched in one academy is
+ever drawn in another.
+
+## Design system
+
+shadcn/ui, new-york style, neutral base colour, the stock `dashboard-01` block; Tabler
+icons in the shell, as the block uses. Deliberate departures from stock:
+
+- **Light theme only.** No second token block and no theme variant; a test fails if one
+  appears.
+- **Two added tokens**, `--success` and `--warning` (each with a foreground), and badge
+  variants for them, beside `--destructive`.
+- **Geist is self-hosted** (`@fontsource-variable/geist`). The app makes no request to a
+  third-party host, at build or at run time; the end-to-end test asserts it.
+- **Logical classes only** (`ms-`, `pe-`, `start-`, `text-start`, ...), so the layout can
+  be mirrored for Arabic later. Enforced by `src/test/logical-classes.test.ts`;
+  `components/ui` is generated with the shadcn CLI's RTL setting and is exempt from that
+  one check.
+- The block's chart, drag-to-reorder rows and demo data are removed, with the
+  dependencies only they needed.
+
+## Tests
+
+| Kind | Where | What it proves |
+|---|---|---|
+| Unit (Vitest, jsdom) | `src/**/*.test.ts(x)` | the error mapper's every branch, `can` and `<Can>`, session reset, the list table reading and writing list state, sign-in validation, the styling rules; the conflict dialog (disputed fields only, both ways out); the athlete form (only changed fields are sent, against the loaded version; server validation messages land on their fields); the transfer form and the requests the team and session forms build; **attendance drafts** (restored after a reload, one `clientRecordId` per athlete kept through every change, wiped by a session reset, unusable storage tolerated); the register (who is recorded and who is still to mark, the count, the request it sends) and the attendance page (a failed submission keeps the marks and the retry sends the same ids) |
+| End-to-end (Playwright) | `e2e/` | against the real stack: a wrong password; sign in, search, sort, page, reload into the same view, sign out; a signed-out deep link returns after sign-in; switching academy; the account page; **two browsers edit one athlete, the second meets the conflict dialog and resolves it both ways**; an admin adds an athlete, creates teams, adds a membership, is refused an overlapping one, transfers the athlete and still finds them on the earlier roster; a coach is not shown the controls their permissions exclude and lands on their sessions; **at 390px a coach signs in, marks half a register, reloads and finds the marks, marks the rest, submits; the first submission reaches the API and its answer is dropped, and the retry leaves one entry per athlete; signing out removes an unfinished draft**; a coach schedules a session for their own team; no horizontal scroll at 1280px and 390px; no third-party request |
+
+The end-to-end run writes screenshots of every screen at both widths, and of the
+conflict, add-to-roster and new-session dialogs, to `e2e/screenshots/` (not committed).
 
 ## Why a SPA rather than SSR
 
@@ -20,5 +245,7 @@ at **one Node process**, which is what makes the brief's "single server" and "bu
 40%" scenarios answerable without redesigning anything. An authenticated internal
 platform has no SEO requirement and no public pages, so server rendering would add a
 second runtime to deploy, monitor, scale and pay for in exchange for nothing concrete.
+The `web` service in `docker-compose.yml` is nginx serving `dist/` for local use and the
+end-to-end tests; it is not a second deployable.
 
 See [`docs/01-technology-stack.md`](../../docs/01-technology-stack.md) §6.

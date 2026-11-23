@@ -1,39 +1,68 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Controller, Get, Post } from '@nestjs/common';
 import {
   CreateSessionRequest,
+  IdParams,
   RecordAttendanceRequest,
-  type ParticipationResponse,
-  type SessionResponse,
-  Uuid,
+  RegisterResponse,
+  SessionListQuery,
+  SessionPage,
+  SessionResponse,
 } from '@athlete/contracts';
 import { SessionsService } from './sessions.service';
-import { Authorize } from '../../common/authz/authorize.decorator';
-import { ZodValidationPipe } from '../../common/http/zod-validation.pipe';
+import { Permission } from '../../common/authz/permission.decorator';
+import { Responds } from '../../common/validation/responds.decorator';
+import {
+  Validate,
+  ValidBody,
+  ValidParams,
+  ValidQuery,
+} from '../../common/validation/validate.decorator';
 
 @Controller('sessions')
 export class SessionsController {
   constructor(private readonly sessions: SessionsService) {}
 
+  @Get()
+  @Permission({ action: 'read', subject: 'trainingSessions' })
+  @Validate({ query: SessionListQuery })
+  @Responds(SessionPage)
+  list(@ValidQuery() query: SessionListQuery): Promise<SessionPage> {
+    return this.sessions.listSessions(query);
+  }
+
   @Post()
-  @Authorize({ roles: ['academy_admin', 'coach'] })
-  create(
-    @Body(new ZodValidationPipe(CreateSessionRequest)) body: CreateSessionRequest,
-  ): Promise<SessionResponse> {
+  @Permission({ action: 'create', subject: 'trainingSessions' })
+  @Validate({ body: CreateSessionRequest })
+  @Responds(SessionResponse)
+  create(@ValidBody() body: CreateSessionRequest): Promise<SessionResponse> {
     return this.sessions.createSession(body);
   }
 
+  /** So the attendance page can be opened by its URL: which team, and when. */
+  @Get(':id')
+  @Permission({ action: 'read', subject: 'trainingSessions' })
+  @Validate({ params: IdParams })
+  @Responds(SessionResponse)
+  getById(@ValidParams('id') id: string): Promise<SessionResponse> {
+    return this.sessions.getSession(id);
+  }
+
   @Post(':id/attendance')
-  @Authorize({ roles: ['academy_admin', 'coach'] })
+  @Permission({ action: 'create', subject: 'sessionParticipants' })
+  @Validate({ params: IdParams, body: RecordAttendanceRequest })
+  @Responds(RegisterResponse)
   recordAttendance(
-    @Param('id', new ZodValidationPipe(Uuid)) sessionId: string,
-    @Body(new ZodValidationPipe(RecordAttendanceRequest)) body: RecordAttendanceRequest,
-  ): Promise<ParticipationResponse[]> {
+    @ValidParams('id') sessionId: string,
+    @ValidBody() body: RecordAttendanceRequest,
+  ): Promise<RegisterResponse> {
     return this.sessions.recordAttendance(sessionId, body);
   }
 
   @Get(':id/attendance')
-  @Authorize({ roles: ['academy_admin', 'coach'] })
-  register(@Param('id', new ZodValidationPipe(Uuid)) sessionId: string): Promise<ParticipationResponse[]> {
+  @Permission({ action: 'read', subject: 'sessionParticipants' })
+  @Validate({ params: IdParams })
+  @Responds(RegisterResponse)
+  register(@ValidParams('id') sessionId: string): Promise<RegisterResponse> {
     return this.sessions.register(sessionId);
   }
 }

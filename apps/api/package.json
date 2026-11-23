@@ -5,18 +5,22 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint --max-warnings 0 .",
     "start": "node dist/main.js",
     "start:dev": "ts-node-dev --respawn src/main.ts",
-    "test": "vitest run --dir test unit route-coverage",
+    "test": "vitest run --dir test unit route-coverage validation.http response.http",
     "test:integration": "vitest run --dir test integration",
-    "migrate": "ts-node src/db/migrate.ts"
+    "migrate": "ts-node src/db/migrate.ts",
+    "user:create": "ts-node src/cli/create-user.ts"
   },
   "dependencies": {
     "@athlete/config": "workspace:*",
     "@athlete/contracts": "workspace:*",
+    "@casl/ability": "^7.1.3",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",
+    "better-auth": "1.7.27",
     "drizzle-orm": "^0.44.5",
     "pg": "^8.16.3",
     "reflect-metadata": "^0.2.2",
@@ -24,17 +28,20 @@
     "zod": "^4.1.5"
   },
   "devDependencies": {
+    "@athlete/eslint-config": "workspace:*",
+    "@nestjs/testing": "^11.1.6",
+    "@seriousme/openapi-schema-validator": "^2.12.0",
     "@testcontainers/postgresql": "^11.7.1",
+    "@types/express": "^5.0.3",
     "@types/node": "^24.3.0",
     "@types/pg": "^8.15.5",
+    "@types/supertest": "^6.0.3",
+    "eslint": "^9.39.1",
+    "supertest": "^7.1.4",
     "testcontainers": "^11.7.1",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.9.2",
-    "vitest": "^3.2.4",
-    "@nestjs/testing": "^11.1.6",
-    "supertest": "^7.1.4",
-    "@types/supertest": "^6.0.3",
-    "@types/express": "^5.0.3"
+    "vitest": "^3.2.4"
   }
 }

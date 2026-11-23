@@ -5,7 +5,15 @@ dist/
 .env
 .env.*
 !.env.example
+# Committed on purpose: its secret values are dotenvx-encrypted. The private key that
+# decrypts them is .env.keys, which the `.env.*` line above keeps out of the repository.
+!.env.development
 coverage/
 .DS_Store
-infra/terraform/.terraform/
-infra/terraform/*.tfstate*
+# Terraform. Stacks are nested (infra/terraform/stacks/<env>/<stack>), so these match
+# at any depth. Each stack's .terraform.lock.hcl IS committed; a module's is not -- a
+# module is only ever initialised on its own to run its tests.
+infra/terraform/**/.terraform/
+infra/terraform/**/*.tfstate*
+infra/terraform/**/*.tfvars
+infra/terraform/modules/**/.terraform.lock.hcl

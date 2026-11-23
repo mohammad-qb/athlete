@@ -1,14 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { Role } from '@athlete/contracts';
+import type { AppAbility } from '../authz/ability';
+import type { Principal, PrincipalScope } from '../authz/principal';
 import type { TenantTx } from './database.service';
 
-export interface Principal {
-  userId: string;
-  academyId: string;
-  roles: Role[];
-}
+export type { Principal, PrincipalScope };
 
-export interface RequestContext extends Principal {
+export interface RequestContext extends Principal, PrincipalScope {
   /**
    * The transaction this request runs in. It already has the tenant key applied via
    * set_config('app.current_academy_id', ..., true), so every query made through it is
@@ -17,6 +14,13 @@ export interface RequestContext extends Principal {
    */
   tx: TenantTx;
   requestId: string;
+  /**
+   * The SCOPED ability: the same policy the guard consulted, now carrying conditions
+   * over this principal's teams and athletes as resolved at `asOf`. Repositories turn
+   * it into WHERE predicates with `accessibleBy`; services instance-check a loaded row
+   * with `ability.can(action, asSubject(type, row))`.
+   */
+  ability: AppAbility;
 }
 
 const storage = new AsyncLocalStorage<RequestContext>();

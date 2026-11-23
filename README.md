@@ -27,6 +27,12 @@ regional kinetic event — in March 2026 two of three AWS UAE availability zones
 down together. The control for that is encrypted backups held out of country and out of
 provider, with a restore that has actually been performed and timed.
 
+The next tier of decisions is in
+[`docs/06-decision-summary.md`](./docs/06-decision-summary.md), including one that was
+**reversed** with the reason recorded (authorization: CASL was first rejected, then
+adopted). The decisions made while hardening the slice each have a record in
+[`docs/adr/`](./docs/adr/README.md).
+
 ---
 
 ## Architecture
@@ -39,13 +45,14 @@ flowchart TB
     end
 
     subgraph edge["Edge"]
-        fd["Front Door + WAF<br/>TLS, caching"]
+        fd["Front Door Standard<br/>TLS, rate limit, asset caching"]
     end
 
     subgraph api["apps/api — ONE deployable"]
-        mw["PrincipalMiddleware<br/>verify session → principal"]
-        guard["AuthorizationGuard<br/>DENY BY DEFAULT"]
-        itx["TenantTransactionInterceptor<br/>BEGIN + set_config(academy_id)"]
+        mw["AuthenticationGuard<br/>session cookie → identity + principal"]
+        guard["AuthorizationGuard<br/>DENY BY DEFAULT<br/>coarse ability: may this role ever?"]
+        val["ValidationInterceptor<br/>declared schemas or refusal"]
+        itx["TenantTransactionInterceptor<br/>BEGIN + set_config(academy_id)<br/>scoped ability: to which rows?"]
 
         subgraph modules["Feature modules"]
             direction LR
@@ -56,22 +63,22 @@ flowchart TB
 
         subgraph layers["Layers inside each module"]
             direction LR
-            ctl["controller<br/>HTTP + Zod only"] --> svc["service<br/>rules + tx boundary"] --> repo["repository<br/>the only SQL"]
+            ctl["controller<br/>HTTP: permission + schemas"] --> svc["service<br/>rules + instance checks"] --> repo["repository<br/>the only SQL<br/>access filter required"]
         end
     end
 
     subgraph data["Data"]
-        pg[("PostgreSQL 17<br/>RLS · exclusion constraints<br/>composite FKs · JSONB")]
+        pg[("PostgreSQL 17<br/>RLS · exclusion constraints<br/>composite FKs · JSONB<br/>grant matrix: no DELETE")]
     end
 
     contracts["packages/contracts<br/>Zod = single source of truth<br/>→ validation · OpenAPI · typed client"]
 
-    browser --> fd --> mw --> guard --> itx --> modules
+    browser --> fd --> mw --> guard --> val --> itx --> modules
     modules --> layers
     repo --> pg
     contracts -.-> browser
     contracts -.-> ctl
-    future -.->|idempotency-key| fd
+    future -.->|client record ids| fd
 
     classDef dim fill:#f6f6f6,stroke:#bbb,color:#555
     class future dim
@@ -82,6 +89,13 @@ flowchart TB
 feature module reaches into a sibling's internals, or when anything outside a repository
 imports the database schema. Every legitimate exception to that last rule is written
 down in [`.dependency-cruiser.cjs`](./.dependency-cruiser.cjs) with its justification.
+The same check holds the SPA's structure: a feature never imports another feature, and
+is imported only through its `index.ts`.
+Authorization is enforced the same way rather than remembered: one
+[CASL](https://casl.js.org) ability definition is the whole policy, a route with no
+declared permission is refused, and a repository read does not compile without the row
+filter derived from that policy
+([`docs/02-architecture.md`](./docs/02-architecture.md#authorization-one-policy-asked-two-ways)).
 
 **Its limitations, stated rather than discovered in review:** one deployable means one
 blast radius — a memory leak in reporting degrades attendance recording too. There is no
@@ -116,7 +130,7 @@ erDiagram
     USERS {
         uuid id PK
         text email UK "NOT tenant-scoped: one person, several academies"
-        text password_hash
+        text full_name "credentials live in auth_accounts, out of the API role's reach"
     }
     USER_ACADEMY_ROLES {
         uuid academy_id FK
@@ -141,7 +155,8 @@ erDiagram
         uuid athlete_id FK "composite FK (academy_id,athlete_id)"
         timestamptz valid_from
         timestamptz valid_to "NULL = current"
-        tstzrange period "GENERATED; EXCLUDE gist(athlete,team,period)"
+        tstzrange period "GENERATED; EXCLUDE gist(athlete,team,period) WHERE not voided"
+        timestamptz voided_at "with voided_by: a wrong fact is voided, never deleted"
     }
     TEAM_COACH_ASSIGNMENTS {
         uuid id PK
@@ -163,6 +178,7 @@ erDiagram
         uuid team_id_at_time "context AS RECORDED, never recomputed"
         text status
         uuid client_record_id UK "UNIQUE(academy_id,client_record_id): offline replay"
+        timestamptz voided_at "with voided_by; one ACTIVE entry per athlete per session"
     }
     ASSESSMENTS {
         uuid id PK
@@ -173,7 +189,7 @@ erDiagram
     }
 ```
 
-Three properties to look for, all enforced below the application:
+Four properties to look for, all enforced below the application:
 
 1. `UNIQUE (academy_id, id)` on every parent, so children declare **composite** foreign
    keys. RLS prevents *reading* another academy's rows; this prevents *referencing* them.
@@ -181,7 +197,19 @@ Three properties to look for, all enforced below the application:
    the **same team**, because an athlete may legitimately be in a U17 squad and the first
    team at once. A blanket "one team at a time" constraint would look stricter and be wrong.
 3. `ON DELETE RESTRICT` on recorded facts. A register that can be emptied by deleting a
-   parent row is not a historical record.
+   parent row is not a historical record. (Until `0002_grants.sql` this was claimed and
+   not true: `training_sessions` and `teams` cascaded onto the register and the
+   membership history. `academy_id → academies` still cascades, deliberately — removing a
+   tenant removes the tenant.)
+4. A privilege matrix, not one role with full DML. `athlete_app` has **no `DELETE` on
+   anything**, column-level `UPDATE` on recorded facts (the voiding columns only — a
+   wrong fact is voided and replaced, never edited), `SELECT` only on academies and
+   role grants, nothing at all on `users` (it holds credentials and has no tenant
+   policy), and nothing on a future table until a migration grants it. A trigger makes
+   `valid_to` and the voiding columns final once set, so a closed period cannot be
+   reopened and a void cannot be undone by that role. The API checks at boot that it is
+   connected as that role, holding no more than this matrix, and refuses to start
+   otherwise.
 
 ---
 
@@ -191,43 +219,50 @@ Three properties to look for, all enforced below the application:
 sequenceDiagram
     autonumber
     participant C as Client
-    participant M as PrincipalMiddleware
+    participant A as AuthenticationGuard
     participant G as AuthorizationGuard
+    participant V as ValidationInterceptor
     participant I as TenantTxInterceptor
     participant S as Service
-    participant P as PolicyService
     participant R as Repository
     participant DB as Postgres
 
-    C->>M: PATCH /api/v1/athletes/:id<br/>Authorization + If-Match "3"
-    M->>M: verify session → principal{userId, academyId, roles}
-    M->>G: next()
-    G->>G: route metadata present?<br/>NO → 403 (deny by default)
-    G->>G: principal.roles ∩ spec.roles?<br/>empty → 403
-    G->>I: next()
+    C->>A: PATCH /api/v1/athletes/:id<br/>session cookie + If-Match "3"
+    A->>A: session row → identity; roles read now → principal{userId, academyId, roles}<br/>attaches or not, never refuses
+    A->>G: next()
+    G->>G: exactly one of @Permission, @Authenticated, @Public declared?<br/>NO → 403 (deny by default)
+    G->>G: COARSE ability: can(update, athletes)?<br/>no conditions, no database · NO → 403
+    G->>V: next()
+    V->>V: parse params + body with the route's declared schemas<br/>unknown or empty → 400, no transaction opened
+    V->>I: next()
     I->>DB: BEGIN
-    I->>DB: select set_config('app.current_academy_id', $1, true)
+    I->>DB: select set_config('app.current_academy_id', $1, true), now()
     Note over I,DB: transaction-scoped: dies with the tx,<br/>cannot leak to the next pooled request
-    I->>S: handler inside AsyncLocalStorage{tx}
-    S->>P: assertCanAccessAthlete(id)
-    P->>R: active coach assignment covering now()?
-    R->>DB: SELECT ... (RLS applies: academy_id = app_current_academy())
-    DB-->>P: rows
-    P-->>S: ok / ForbiddenException
-    S->>R: updateIfVersionMatches(id, 3, patch)
-    R->>DB: UPDATE ... WHERE id=$1 AND academy_id=$2 AND version=3
+    I->>DB: coach only: active assignments, then active memberships, as of now()
+    DB-->>I: activeTeamIds, visibleAthleteIds (RLS applies)
+    I->>I: SCOPED ability: same rules, now with conditions
+    I->>S: handler inside AsyncLocalStorage{tx, ability}
+    S->>S: assertCan(update, athletes, {id})<br/>in memory, synchronous · out of scope → 403
+    S->>R: updateIfVersionMatches(id, 3, patch, accessFilter)
+    R->>DB: UPDATE ... WHERE id=$1 AND academy_id=$2 AND version=3<br/>AND id IN (visibleAthleteIds)
     DB-->>R: rowCount
     alt rowCount = 1
         R-->>S: updated row (version 4)
         S-->>C: 200 + ETag "4"
         I->>DB: COMMIT
     else rowCount = 0
-        S->>R: findById(id)
+        S->>R: findById(id, accessFilter)
         R-->>S: exists → stale
         S-->>C: 409 Conflict (stale_write)
         I->>DB: ROLLBACK
     end
 ```
+
+The same policy is asked twice, and that is the design: once before any query, without
+conditions, to decide whether the route is open to this role at all; once inside the
+tenant transaction, with the principal's teams and athletes resolved, to decide which
+rows. An administrator's access filter is empty (RLS is their only boundary), so the
+`AND id IN (...)` line exists only for a coach.
 
 ---
 
@@ -237,17 +272,17 @@ sequenceDiagram
 flowchart TB
     subgraph gh["GitHub"]
         repo["Repository"]
-        ci["Actions CI<br/>typecheck · boundaries · unit · integration"]
-        cd["Deploy<br/>OIDC federated — no stored secret"]
+        ci["Actions CI<br/>typecheck · lint · boundaries · unit<br/>integration · smoke · e2e · terraform checks"]
+        cd["Deploy (designed, not written)<br/>OIDC federated — no stored secret<br/>may write the app, not IAM or network"]
     end
 
     subgraph uaen["Azure UAE North (Dubai) — PRIMARY"]
         acr["Container Registry"]
-        mig["Migration job<br/>SEPARATE STEP, pre-deploy"]
+        mig["Migration job, inside the VNet<br/>SEPARATE STEP, pre-deploy"]
         ca["Container App<br/>API · min 2 replicas"]
-        pg[("PostgreSQL Flexible Server<br/>zone-redundant HA · PITR 35d")]
+        pg[("PostgreSQL Flexible Server<br/>VNet-only · zone-redundant HA · PITR 35d")]
         blob["Blob static website<br/>SPA bundle"]
-        fd["Front Door + WAF"]
+        fd["Front Door Standard<br/>rate limit only"]
         kv["Key Vault<br/>secrets + backup key"]
         obs["Log Analytics<br/>+ Application Insights"]
     end
@@ -276,7 +311,11 @@ flowchart TB
 
 Costs, RPO/RTO per failure scenario, and the answers to "budget cut 40%", "single
 server" and "50,000 athletes" are in
-[`docs/05-deployment.md`](./docs/05-deployment.md).
+[`docs/05-deployment.md`](./docs/05-deployment.md). Two labels in this diagram are
+deliberately modest: the edge is Front Door **Standard**, whose WAF is a single
+rate-limit rule and whose origins are also reachable directly; and the deploy pipeline
+is a designed sequence, not a written workflow. None of this infrastructure has been
+applied.
 
 ---
 
@@ -287,14 +326,34 @@ pnpm install
 pnpm --filter @athlete/config --filter @athlete/contracts run build
 
 pnpm run typecheck          # TypeScript across the workspace
+pnpm run lint               # type-aware ESLint; a dropped `await` is a build failure
 pnpm run lint:boundaries    # architecture fitness rules
 pnpm --filter @athlete/api run test              # unit — no Docker needed
+pnpm --filter @athlete/web run test              # the SPA's unit tests (jsdom)
 pnpm --filter @athlete/api run test:integration  # real Postgres via Testcontainers
+
+# after changing a route or a contract: regenerate what is generated from them
+UPDATE_ROUTE_MANIFEST=1 UPDATE_OPENAPI=1 pnpm --filter @athlete/api run test
+pnpm --filter @athlete/web run generate          # the typed client, from openapi.json
 ```
 
-The unit suite needs placeholder env values (`DATABASE_URL`, `SESSION_SECRET`) because
-configuration is validated at boot and the app refuses to start half-configured. See
-[`.env.example`](./.env.example).
+Neither suite needs any environment: the unit suite never boots the application, and
+the integration suite builds its own connection strings from the containers it starts.
+
+### Run the API on the host
+
+```bash
+pnpm dev        # dotenvx run --strict -f .env.development -- start:dev
+```
+
+[`.env.development`](./.env.development) is committed with its secret values
+encrypted by [dotenvx](https://dotenvx.com); the private key is `.env.keys`, which is
+git-ignored and travels out of band. Without it the command stops with
+`DECRYPTION_FAILED` naming the variables, rather than booting on ciphertext. **A
+reviewer without the key is not blocked**: the compose stack below needs no env file at
+all, and [`.env.example`](./.env.example) lists the same variables in the clear for
+exporting by hand. A variable already set in the shell wins over the file
+(`DATABASE_URL=... pnpm dev`).
 
 ### Run the whole stack — and the single-server answer
 
@@ -303,65 +362,300 @@ configuration is validated at boot and the app refuses to start half-configured.
 beside it, one box.
 
 ```bash
-docker compose up -d --build        # postgres + api
+docker compose up -d --build        # postgres + api + web (the SPA, on :8080)
 docker compose run --rm migrate     # migrations as a SEPARATE step, as in CI
-./scripts/smoke.sh                  # end-to-end checks over HTTP
+./scripts/smoke.sh                  # end-to-end checks over HTTP (seeds what it needs)
+pnpm --filter @athlete/web exec playwright install chromium   # once
+pnpm --filter @athlete/web run test:e2e   # the SPA in a real browser, same stack
 
-# if port 5432 or 3000 is already taken on your machine:
-POSTGRES_PORT=55432 API_PORT=3100 docker compose up -d --build
+# if port 5432, 3000 or 8080 is already taken on your machine:
+POSTGRES_PORT=55432 API_PORT=3100 WEB_PORT=8180 docker compose up -d --build
 POSTGRES_PORT=55432 docker compose run --rm migrate
-API_PORT=3100 ./scripts/smoke.sh
+API_PORT=3100 WEB_PORT=8180 ./scripts/smoke.sh
+WEB_PORT=8180 pnpm --filter @athlete/web run test:e2e
 ```
+
+### The web app
+
+With the stack up, migrated and seeded (`./scripts/seed-dev.sh`, below), open
+<http://localhost:8080> and sign in as `admin@alpha.test`, `coach@alpha.test` or
+`both@alpha.test` (two academies: the one to try the academy switcher with). The `web`
+service is nginx serving the built SPA and proxying `/api` to the API, so the browser
+sees one origin, as it does behind Front Door. To develop it, run the API on the host
+with `pnpm dev` and the SPA with `pnpm dev:web` (Vite on :5173, proxying `/api`).
+
+An administrator lands on the athletes list and a coach on their sessions; the same
+application, with the menu and the controls the signed-in person's permissions allow.
+To see the coach's flow, sign in as `coach@alpha.test` (on a phone-sized window, if you
+like), create a session for Team A, open it and mark the register. What is built, and
+how it is put together: [`apps/web/README.md`](./apps/web/README.md).
+
+### Sign in
+
+There is no sign-up: an account is created by an operator, with the owner connection,
+the same way a migration is run. [`scripts/seed-dev.sh`](./scripts/seed-dev.sh) does
+that for a local stack — the demo academies, teams and athletes, plus an administrator
+and a coach of Alpha Academy and one person who belongs to both academies:
+
+```bash
+./scripts/seed-dev.sh               # admin@alpha.test, coach@alpha.test, both@alpha.test
+                                    # password: $SEED_PASSWORD, default athlete-dev-password
+
+# sign in: the session comes back as an httpOnly cookie. The Origin is the SPA's
+# (APP_BASE_URL): the only origin whose state-changing requests the API accepts.
+curl -c jar -H 'Content-Type: application/json' -H 'Origin: http://localhost:8080' \
+  -d '{"email":"coach@alpha.test","password":"athlete-dev-password"}' \
+  http://localhost:3000/api/auth/sign-in/email
+
+curl -b jar http://localhost:3000/api/v1/me         # who am I, where, and what may I attempt
+curl -b jar http://localhost:3000/api/v1/athletes   # the coach's own team, and only that
+
+# any other account: the operator CLI, password on stdin
+printf '%s' 'a-long-password' | docker compose run --rm -T migrate \
+  node dist/cli/create-user.js --email new@alpha.test --name 'New Person' \
+  --academy 11111111-1111-1111-1111-111111111111 --role coach
+```
+
+Sign-in, sign-out and change-password are better-auth's own routes under `/api/auth`;
+everything else is under `/api/v1`. Why sessions are rows, why better-auth has a
+database role of its own, and why the browser cannot choose its academy:
+[ADR 0006](./docs/adr/0006-cookie-sessions-and-the-auth-role.md).
 
 ### Verified state of this repository
 
-Run on macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2, `postgres:17-alpine`:
+Run on 23 November 2026, on macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2,
+`postgres:17-alpine`. Turborepo's cache was bypassed (`--force`) and the compose stack
+was started on a fresh volume (with `POSTGRES_PORT=55432`, port 5432 being taken on the
+machine):
 
 ```
-pnpm run typecheck                          ✓ no errors (5 tasks)
-pnpm run lint:boundaries                    ✓ no violations (39 modules, 74 dependencies)
-pnpm run build                              ✓ 3 tasks
-test (unit)                                 ✓ 10 passed  (2 files)
-test:integration (real Postgres)            ✓ 17 passed  (4 files)
-docker build -f apps/api/Dockerfile         ✓ image builds
-docker compose up + run migrate             ✓ Applied: 0000_init.sql, 0001_rls.sql
-./scripts/smoke.sh (containerised stack)    ✓ 11/11 checks passed
+pnpm install --frozen-lockfile              ✓ lockfile unchanged
+pnpm run build                              ✓ 4 tasks (the SPA bundle included)
+pnpm run typecheck                          ✓ no errors (6 tasks)
+pnpm run lint                               ✓ no errors (7 tasks, type-aware)
+pnpm run lint:boundaries                    ✓ no violations (API: 82 modules, 187 dependencies;
+                                              SPA: 116 modules, 285 dependencies)
+test (unit + route coverage + HTTP)         ✓ 315 passed (18 files)
+web test (Vitest, jsdom)                    ✓ 166 passed (21 files)
+test:integration (real Postgres)            ✓ 135 passed (10 files)
+web generate + git diff --exit-code         ✓ openapi.json and the generated client unchanged
+docker compose up --build                   ✓ the api and web images build
+docker compose run migrate                  ✓ Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql, 0003_auth.sql
+./scripts/smoke.sh (containerised stack)    ✓ 111/111 checks passed
+web test:e2e (Playwright, same stack)       ✓ 25 passed
 ```
 
-The smoke run, verbatim — note check 4, which is the same request as check 3 with a
-different academy's token:
+Smoke before end-to-end, as above: the end-to-end suite adds athletes and teams to
+Alpha Academy, and four of the smoke checks read Alpha's athletes and teams as a fresh
+seed leaves them. CI runs the two in separate jobs, each on its own stack.
+
+The smoke run, verbatim, from that fresh volume. Every request after the first block
+carries a session cookie obtained by signing in over HTTP; "academy B sees an empty
+page" is the same request as the line above it with another person's cookie:
 
 ```
+Signing in (a session row behind an httpOnly cookie)
+  PASS  wrong password is refused                    401
+  PASS  Alpha's administrator signs in               200
+  PASS  Beta's administrator signs in                200
+  PASS  the coach signs in                           200
+  PASS  the cookie is httpOnly                       1
+  PASS  a burst of sign-ins is rate limited          429
+  PASS  public sign-up is closed                     false
+
 Liveness and deny-by-default
   PASS  health is public                             200
-  PASS  no token is refused                          401
+  PASS  no cookie is refused                         401
+  PASS  a made-up cookie is refused                  401
+
 Tenant isolation over HTTP (identical request, different academy)
   PASS  academy A sees its athletes                  200
-  PASS  academy B sees an empty list                 []
+  PASS  academy B sees an empty page                 0 of 0
   PASS  A's athlete is invisible to B                404
+
+Resource scoping inside one academy (a coach of team A; team B exists beside it)
+  PASS  coach lists only their team's athletes       44444444-4444-4444-4444-444444444444
+  PASS  ...and the total counts only those           1 of 2
+  PASS  coach is refused team B's roster             403
+
 Optimistic concurrency
-  PASS  read returns an ETag                         0
+  PASS  read returns an ETag                         integer
   PASS  write with current ETag wins                 200
   PASS  stale write is refused                       409
   PASS  write without If-Match refused               400
-Validation
+
+Error contract (one shape for every failure, not just a status code)
+  PASS  conflict is typed CONFLICT                   CONFLICT
+  PASS  conflict carries a stable code               stale_write
+  PASS  a refusal is typed NOT_FOUND                 NOT_FOUND
+  PASS  no cookie is typed UNAUTHORIZED              UNAUTHORIZED
+  PASS  an overlapping membership is a 409           409
+  PASS  ...with a stable code                        membership_overlap
+  PASS  a membership ending before it starts         membership_period_invalid
+  PASS  a membership for an unknown athlete          athlete_not_found
+  PASS  a transfer dated before the athlete joined   membership_period_invalid
+  PASS  a transfer from a team the athlete is not on no_open_membership
+  PASS  the refused transfer changed nothing         44444444-4444-4444-4444-444444444444
+
+Validation (on by default; a 200 never means "nothing happened")
   PASS  malformed body is refused                    400
   PASS  malformed id is refused                      400
+  PASS  validation is typed VALIDATION               VALIDATION
+  PASS  the failing field is named                   params:id
+  PASS  misspelled field is refused                  400
+  PASS  ...and names the field                       body:dateofBirth
+  PASS  empty patch is refused                       400
+  PASS  the ETag did not move                        1 integer
+  PASS  garbage query value is a 400                 400
+  PASS  a valid instant is accepted                  200
+  PASS  unknown query parameter refused              400
+
+Lists (one page of what the caller may see; the query string is a contract)
+  PASS  a list is { items, total, page, pageSize }   items,page,pageSize,total
+  PASS  page and pageSize default to 1 and 25        1/25
+  PASS  pageSize bounds the page, not the total      1 of 2
+  PASS  sort orders the page                         Oryx
+  PASS  q searches names, case-insensitively         44444444-4444-4444-4444-444444444444
+  PASS  a coach cannot search outside their team     0
+  PASS  an unlisted sort key is a 400                400
+  PASS  ...naming the parameter                      query:sort
+  PASS  pageSize above 100 is a 400                  400
+  PASS  an unknown parameter is a 400                400
+
+Teams and sessions (lists, and reads by id for deep links)
+  PASS  an admin lists both teams                    Team A,Team B
+  PASS  a coach lists the team they coach            Team A of 1
+  PASS  a team is read by id                         Team A
+  PASS  a coach reads their own team                 200
+  PASS  ...and another team is a 404 to them         404
+  PASS  another academy's team is a 404              404
+  PASS  a session is read by id                      66666666-6666-6666-6666-666666666666
+  PASS  sessions are listed, filtered by team        true
+  PASS  a coach sees their team's sessions only      true
+  PASS  ...and another team's session is a 404       404
+  PASS  a period filter is half-open [from, to)      0
+  PASS  sessions have nothing to search: q is 400    400
+
+Attendance (a register is recorded facts; a replayed submission is a no-op)
+  PASS  a new register is empty                      0
+  PASS  the coach records attendance                 201
+  PASS  the register holds the entry                 1 late bus
+  PASS  a replay of the same id is accepted          201
+  PASS  ...and changes nothing                       1 late bus
+  PASS  ...answering with the stored register        1 late
+  PASS  the same athlete under a new id is 409       409
+  PASS  ...typed attendance_already_recorded         attendance_already_recorded
+  PASS  an athlete who was not on the team is 400    400
+  PASS  ...typed athlete_not_on_team                 athlete_not_on_team
+  PASS  the register still holds one entry           1
+  PASS  another academy cannot read the register     404
+  PASS  a session ending before it starts is 400     400
+  PASS  ...typed session_time_invalid                session_time_invalid
+
+Responses (declared, and encoded through the declaration)
+  PASS  a create answers 201                         201
+  PASS  switching academy answers 200, as declared   200
+  PASS  a versioned read carries its version twice   true
+
+Who am I (GET /me: academies, and the coarse permissions of the active one)
+  PASS  /me needs a session                          401
+  PASS  /me names the signed-in user                 admin@alpha.test
+  PASS  ...their academies and roles                 Alpha Academy:academy_admin
+  PASS  ...and the active academy                    11111111-1111-1111-1111-111111111111
+  PASS  an admin may create athletes                 true
+  PASS  a coach may not                              false
+  PASS  a coach may record attendance                true
+  PASS  the wildcard is never reported               false
+
+Switching academy (the server chooses; the browser asks)
+  PASS  member of both signs in                      200
+  PASS  starts in the first academy by name          11111111-1111-1111-1111-111111111111
+  PASS  ...as a coach there                          false
+  PASS  switches to the other academy                200
+  PASS  the session moved                            22222222-2222-2222-2222-222222222222
+  PASS  ...with the roles held THERE                 true
+  PASS  ...and sees that academy's data              0
+  PASS  an academy that is not theirs is 403         403
+  PASS  ...typed not_a_member                        not_a_member
+  PASS  ...and the session did not move              11111111-1111-1111-1111-111111111111
+  PASS  update-session cannot choose a tenant        11111111-1111-1111-1111-111111111111
+
+Origin check (a cookie is ambient; a state-changing request must say where it is from)
+  PASS  POST from a foreign origin is 403            403
+  PASS  ...typed invalid_origin                      invalid_origin
+  PASS  ...and nothing was written                   0
+  PASS  a foreign-origin GET is not refused          200
+  PASS  the application's own origin passes          200
+  PASS  better-auth refuses it on its routes         403
+  PASS  ...and the session survived that             200
+
+Signing out (the row is deleted, so a copied cookie is worth nothing)
+  PASS  sign-out succeeds                            200
+  PASS  the old cookie is refused                    401
+  PASS  ...on every route                            401
+  PASS  another session is unaffected                200
+
+All smoke checks passed.
 ```
 
-The 409 body, because a conflict should tell the caller how to recover:
+The script is re-runnable: a second run against the same volume also passes 111/111,
+with a higher integer on the ETag line. It takes about half a minute, most of it spent
+waiting out the sign-in rate limit it then asserts.
+
+Every failure has the same shape, because a client should be able to write one error
+handler. The 409 body, which also has to tell the caller how to recover:
 
 ```json
 {
-  "error": "stale_write",
-  "message": "Athlete was modified by someone else since you loaded it (your version: 0). Re-read the resource and reapply your change."
+  "statusCode": 409,
+  "name": "ApiError",
+  "message": "Athlete was modified by someone else since you loaded it",
+  "type": "CONFLICT",
+  "code": "stale_write",
+  "explanation": "Re-read the resource and reapply your change. A conflict here means the write was refused, not partially applied.",
+  "meta": { "expectedVersion": 0 }
 }
 ```
 
-**Terraform has not been applied or validated** — no Azure subscription and no
-Terraform binary were available. It is a reviewed design artifact; expect
-provider-schema corrections on first `plan`. [`infra/terraform/README.md`](./infra/terraform/README.md)
-lists exactly what is stubbed.
+`type` is the stable category to switch on, `code` identifies the specific failure,
+`meta` is machine-readable and `explanation` is for a human. What is **not** in any
+body is the `cause` chain: an unexpected failure is redacted to `"Internal server
+error"` and the original survives only in the log. When one was provoked
+deliberately — an unparseable `?at` on the roster route, which used to reach the
+driver — the client got:
+
+```json
+{ "statusCode": 500, "name": "ApiError", "message": "Internal server error", "type": "INTERNAL" }
+```
+
+while the log line carries the full failing SQL, its bound parameters and the tenant
+id. That asymmetry is the point of keeping `cause` unserialisable: a filter can attach
+a raw `pg` error without anyone having to judge whether it leaks.
+
+That particular request no longer gets that far, because it was never a server fault.
+Every route declares the schemas its input must satisfy and nothing reaches a handler
+unparsed, so the same `?at=garbage` is now the caller's 400, with the field named:
+
+```json
+{
+  "statusCode": 400,
+  "name": "ApiError",
+  "message": "Request validation failed",
+  "type": "VALIDATION",
+  "code": "validation_failed",
+  "meta": { "fields": [{ "in": "query", "path": "at", "messages": ["Invalid ISO datetime"] }] }
+}
+```
+
+The redaction itself stays asserted by `error-responder.unit`.
+
+**Terraform has been validated but never planned or applied** — there is no Azure
+subscription. Every stack passes `fmt`, `validate` against the locked azurerm schema,
+`terraform test` with a mocked provider, and `tflint` with the azurerm ruleset (CI runs
+the same four). None of that touches Azure: the permission lists are reasoned, not
+exercised, and regional availability is unchecked.
+[`infra/terraform/README.md`](./infra/terraform/README.md) lists what was verified, what
+was not, and what is still a stub.
 
 ---
 
@@ -373,12 +667,35 @@ Each one exists to make a specific claim falsifiable.
 |---|---|---|
 | `tenancy.isolation.integration` | Connects as a **`NOBYPASSRLS` non-owner role**, then: an academy sees only its own athletes; no tenant context returns **zero** rows (fails closed); inserting into another academy is refused; **referencing** another academy's team is refused by a composite FK; cross-tenant role lookup exists only behind one audited `SECURITY DEFINER` function | "prevent unauthorized access between academies" |
 | `temporal.membership.integration` | Overlapping periods in the same team rejected; concurrent membership of *different* teams allowed; back-to-back periods permitted (`[)` bounds); inverted periods rejected; "who was on this team in March" answered from the period | "maintaining historical records" |
-| `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted; a replayed offline submission inserts nothing | "maintaining historical records when athletes change teams" |
+| `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted — by the application role (no privilege) or by the owner (`RESTRICT`); a replayed offline submission inserts nothing (and over HTTP, in `scripts/smoke.sh`: a replay answers with the stored register, and the same athlete under a new id is a typed 409) | "maintaining historical records when athletes change teams" |
 | `concurrency.optimistic-lock.integration` | Two writers hold version 0; the first wins, the second affects **zero rows** → 409, and the first writer's change survives; no row lock is held across user think-time | "two users update the same record simultaneously" |
-| `authz.route-coverage` | Walks the real module graph and fails if **any** route lacks `@Authorize` or `@Public`; the public allowlist is asserted explicitly | "secure access based on user roles and responsibilities" |
-| `optimistic-concurrency.unit` | `If-Match`/`ETag` parsing, including malformed and weak validators | — |
+| `authz.route-coverage` | Walks the real module graph and fails if **any** route does not carry exactly one of `@Permission`, `@Authenticated` and `@Public`; every declared `(action, subject)` is in the shared vocabulary and every subject is claimed by a route or explicitly reserved; the public allowlist is asserted explicitly; the committed [route manifest](docs/reference/route-manifest.md), with paths as served under `/api/v1`, must match the code. The same walk covers responses: every route declares `@Responds`, an `ETag` is only promised on a versioned body, and a route that requires `If-Match` returns the new version. And validation: no handler binds `@Body`, `@Param` or `@Query`; every part of the request a handler reads, every body-taking method and every path parameter has a declared schema; and every declared schema refuses an unknown key | "secure access based on user roles and responsibilities" |
+| `authz.ability.unit` | One CASL ability definition is the whole policy: grants per role; the operations each route demanded before are held by exactly the roles those routes listed; the coarse (guard) and scoped (query) modes agree on which operations exist, and scoped never grants what the guard refuses; a coach with no active assignment gets **no rule**, not a rule over an empty list | "secure access based on user roles and responsibilities" |
+| `authz.guard.unit` | The guard refuses an undeclared route even for a platform administrator, **and one with two declarations**; answers 401 without a session; admits an account with no academy to an `@Authenticated` route and refuses it a `@Permission` one; and decides from the ability rather than a role list on the route | "secure access based on user roles and responsibilities" |
+| `authz.to-sql-where.unit` | A rule condition compiles to the SQL it says (asserted on rendered text and bound parameters), agrees with the in-memory matcher on `NULL` — including ordering, where CASL coerces null to 0, cross-checked against the real matcher — and **throws** on an unknown operator, an unmapped field, a relation or a boolean ordering operand — a restriction is never silently dropped | — |
+| `authz.accessible-by.unit` | The query filter derived from an ability is unrestricted for an administrator, a predicate for a coach, and a **403** when nothing grants the action — never an unfiltered query | — |
+| `authz.resource-scoping.integration` | Inside one academy a coach lists only their team's athletes, is refused another team's athlete, roster and session, and **a coach whose assignment closed is refused the roster they could read last month** — same data, only the instant differs; an administrator sees the whole academy; nothing crosses academies. A last block calls the repositories directly with a row outside the filter, so a repository that accepts the predicate and ignores it fails | "secure access based on user roles and responsibilities" |
+| `privileges.matrix.integration` | As the application role, inside its own tenant: `DELETE` on a recorded fact is refused; so is `UPDATE` of anything but the voiding columns; a session with a register cannot be deleted **even by the owner** (`RESTRICT`, where it used to cascade); a role grant, a user or an academy cannot be created, and `users` cannot be read; a table added later is unreachable without an explicit grant; correction works as void + re-insert; a voided membership grants no access; a closed period cannot be reopened and a void cannot be undone or re-attributed, while the owner can still repair a row; the boot assertion accepts `athlete_app`, refuses the owner, and refuses a non-owner role holding one grant more than the matrix — table-level or on single columns, of any privilege kind (`INSERT (…)` on role grants, `REFERENCES`, `TRIGGER`, `MAINTAIN` included); the application role cannot read `users` or any `auth_*` table, and the auth role holds exactly identity and sessions — every privilege on every table in the schema is enumerated, and it cannot read an athlete, a role grant, or call the cross-tenant lookup | "prevent unauthorized access"; "maintaining historical records" |
+| `database-privileges.unit` | The boot-time refusal: each of superuser, `BYPASSRLS`, table ownership, a role reachable only by `SET ROLE`, and any privilege outside the matrix (table-level or column-level, of any kind, on any of its tables) is reported, all at once, and an unmigrated database is a refusal rather than a clean bill | — |
+| `authz.principal-scope.integration` | A coach's scope follows the periods in the data at one instant: a closed assignment contributes no team, an athlete who left drops out, the period is half-open, the instant is the database transaction's `now()` rather than the host clock, and the same user's assignment in another academy is unreachable | "secure access based on user roles and responsibilities" |
+| `validation.http` | Over real HTTP against a running Nest application: the handler receives the schema's **parsed output** (a coerced number, a default), not the raw request; an invalid or unknown field is a 400 typed `VALIDATION` naming it by dot path, with params, query and body reported together; and **a route that reads input without declaring a schema is refused** (500, reason in the log only) rather than handed the raw body | — |
+| `response.http` | Over real HTTP: a field the route's response schema does not declare is **stripped** (a handler returning a whole row leaks nothing), a missing or mistyped field is a 500 `response_contract_violation` with the reason in the log and none of the value on the wire, and **a route that declares no response is refused before its handler runs**; a declared status is the status served; `ETag` is the encoded body's version; `@IfMatch` refuses a write that does not name the version it edits | — |
+| `openapi.document.unit` | The committed `apps/api/openapi.json` is byte-for-byte what the code generates; it validates as OpenAPI 3.1; it contains every served route and nothing else, each with the status it answers with; every `$ref` resolves; `If-Match`/`ETag` appear on exactly the routes that use them; every error status is the one shared body; the session cookie is required everywhere but `@Public`. Requests render from their input side, responses from their output side, and one id with two shapes is refused | — |
+| `contracts.lists.unit` | The list contract coerces `page` and `pageSize` from query-string text, bounds them (`pageSize` ≤ 100), accepts only a listed sort key in either direction, trims and bounds `q`, and refuses an unknown parameter instead of ignoring it; a search term's `%` and `_` are escaped | — |
+| `lists.pagination.integration` | A list is one page of exactly the rows the caller may see, **and `total` is counted under the same access filter**: six athletes exist, a coach of one team gets four and a total of four, and cannot find another team's athlete by name. Sort, search and paging behave, including across ties; a team or session outside scope is a 404 by id; a coach with no current team is refused rather than shown an empty page | "secure access based on user roles and responsibilities" |
+| `contracts.requests.unit` | A request schema never turns a mistake into a successful no-op: a PATCH with a misspelled field, or with no field, is refused where it used to validate to `{}` and bump the version; every request schema, nested entries included, refuses unknown keys; `?at` must be an ISO-8601 instant with an offset | "two users update the same record simultaneously" |
+| `optimistic-concurrency.unit` | `If-Match`/`ETag` parsing, including malformed and weak validators; a stale write is a 409 carrying the version the caller held | "two users update the same record simultaneously" |
+| `auth.session.integration` | With better-auth connected as its own role: an account made by the operator CLI signs in and gets an httpOnly, SameSite=Lax cookie that resolves to a session **row**; a wrong password and an unknown email are refused identically; sign-up is refused over HTTP and server-side; after sign-out, or a `DELETE` of the row, the same cookie resolves to nothing on the next request; the browser cannot set its academy through `update-session`; a session whose academy the user no longer belongs to falls back and is rewritten | "secure access based on user roles and responsibilities" |
+| `auth.owner.integration` | Migrated by an owner that is **not a superuser** (the production arrangement, and the one no other suite has): the operator CLI still creates accounts, and the cross-tenant lookup still returns a user's academies. It returned nothing before `0003`, which every superuser-migrated suite passed straight over | — |
+| `origin.guard.unit` | A state-changing request naming another origin (another scheme, port, subdomain, or `null`) is refused with `invalid_origin`; the application's origin and a request with no `Origin` pass; a GET is never refused | — |
+| `me.unit` | `/me` lists exactly the `(action, subject)` pairs the coarse ability grants, by asking it rather than restating it; never the `manage` wildcard; nothing without a principal; switching to an academy the user is not in is a 403 that writes nothing | — |
+| web `drafts`, `register`, `attendance-page` (Vitest) | The attendance register's draft: a mark and its `clientRecordId` survive a reload, the id is made once per athlete and never replaced, a failed submission keeps the draft and **the retry sends the same ids**, success and a session reset delete it, unusable storage is tolerated; only athletes with no stored entry are ever sent | "maintaining historical records" |
+| web e2e `attendance.spec` (Playwright, 390px) | Against the real stack: a coach signs in, lands on sessions, marks half a register, reloads and finds the marks, marks the rest; **the first submission reaches the API and its answer is dropped, the retry stores nothing twice** (one entry per athlete, read back from the API); signing out removes an unfinished draft | — |
+| web e2e `athlete-conflict.spec` (Playwright) | Two browsers edit one athlete; the second meets the conflict dialog and resolves it both ways | "two users update the same record simultaneously" |
+| `api-error.unit` | Every error type maps to the status and log severity the contract promises, the type list is exhaustive (adding one without a status fails here), and `toJSON` cannot serialise `cause` | — |
+| `error-responder.unit` | One log line per failure at its own severity; `meta` logged for 5xx and withheld for 4xx; an unexpected error is redacted to `"Internal server error"` while the **whole cause chain** reaches the log, bounded and cycle-guarded; a 5xx `HttpException` is redacted the same way, payload and all, so choosing a status is not a claim the message is publishable; a 4xx `HttpException` publishes its message and **nothing else** of its payload; an `http-errors` 4xx keeps its status only when it marked itself exposable; a response already begun is closed rather than crashed | — |
 
-### Three findings from actually running this
+### Four findings from actually running this
 
 The first version of the isolation suite **passed while reading across tenants.**
 
@@ -413,8 +730,21 @@ and path parameters validate against that same primitive rather than Nest's
 `ParseUUIDPipe` — so there is exactly one definition of a valid id, which was the point
 of `packages/contracts` in the first place.
 
+**4. The smoke script was proving tenant isolation as a superuser.**
+
+The compose stack's API connected as `postgres`. A superuser ignores row-level security
+(finding 1, again, one layer up), so every "tenant isolation over HTTP" check in the
+smoke script was passing on the repositories' own `academy_id` predicates, with RLS
+never applied. Nothing failed and nothing was logged.
+
+It was found the day the API gained a boot-time assertion about its own database role:
+the assertion refused the compose file's connection string. The API now connects as
+`athlete_app` everywhere, checks at start that it is not a superuser, not an owner and
+holds no privilege beyond its matrix, and exits otherwise. A guarantee that depends on
+which role you connect as needs something that checks the role.
+
 **Why this matters beyond the bugs:** findings 2 and 3 were invisible to 17 passing
-integration tests and caught by an 11-line smoke script in under a minute. Database
+integration tests and caught by the smoke script in under a minute. Database
 tests and wiring tests catch different classes of defect. Keeping both is cheap; relying
 on either alone is how an API that returns 401 to everyone passes CI.
 
@@ -424,25 +754,49 @@ on either alone is how an API that returns 401 to everyone passes CI.
 
 Scope choices, each one a decision rather than an omission:
 
-- **Web UI beyond the deployment shape.** The brief states frontend design is not being
-  assessed. `apps/web` holds the build target and the reasoning only.
+- **A designed web UI.** The brief states frontend design is not being assessed, so the
+  SPA is stock shadcn/ui (`dashboard-01`, light theme only) with no custom design work.
 - **Native mobile.** Out of scope — but the real-world gap is named: coaches mark
   attendance pitch-side on poor connectivity. The write API is therefore already
-  idempotent (client-generated UUIDs + `Idempotency-Key`), so offline sync becomes a
-  feature rather than a rewrite. Proven by the replay test.
+  idempotent (a client-generated id on every attendance entry), so offline sync becomes
+  a feature rather than a rewrite. Proven by the replay test, over HTTP by the smoke
+  script, and in a browser: the web register keeps its marks and their ids on the
+  device, and a submission whose answer was lost is repeated without storing anything
+  twice.
 - **Full CRUD across all entities.** Coaches, assessments and scheduling exist in the
   schema and the proposal, not in the API surface. Six shallow modules would prove less
   than one slice that carries every hard guarantee.
-- **Credential storage and session management.** Production uses a maintained auth
-  library (argon2id, refresh rotation, TOTP) with users and sessions in this same
-  Postgres. The slice implements token *verification* so the authorization and tenancy
-  paths are exercised with a real principal. Hand-rolling credential storage to pad a
-  case study would be the wrong signal.
-- **OpenAPI generation and the generated client.** Specified in
-  [`docs/01-technology-stack.md`](./docs/01-technology-stack.md); the Zod contracts it
-  generates from are already the single source of truth in `packages/contracts`.
-- **Front Door, private networking, backup cron, restore drill.** Marked `STUB` in the
-  Terraform file each belongs in.
+- **Account management beyond signing in.** Sessions are real
+  ([better-auth](https://www.better-auth.com), httpOnly cookies, rows in this Postgres,
+  [ADR 0006](./docs/adr/0006-cookie-sessions-and-the-auth-role.md)), and that is where
+  it stops: accounts are created by an operator CLI, and there is no sign-up,
+  invitation, password reset by email, email verification or TOTP. Each needs outbound
+  email or a requirement that does not exist yet. Password hashing is the library's
+  default scrypt, not argon2id
+  ([`docs/01-technology-stack.md` §7](./docs/01-technology-stack.md#7-authentication--better-auth-users-in-our-own-postgres)).
+- **A void endpoint, and anything on assessments.** Voiding a wrongly recorded fact
+  works and is tested at the database, as the application role; no route does it. The
+  rule that a departed coach keeps the assessments they authored is designed and has
+  no route to apply to.
+- **Offline attendance, and anything in the web application beyond the API.**
+  `apps/web` is a working SPA on the typed client generated from
+  [`apps/api/openapi.json`](./apps/api/openapi.json), and it covers what the API offers
+  to an academy administrator and a coach: sign in, sign out, change password, the shell
+  with a role-aware menu and an academy switcher, athletes (list, add, edit, with a
+  dialog that resolves an edit conflict), teams (list, create, roster as of a day, add
+  an athlete, transfer), sessions (list, schedule) and the attendance register on a
+  phone. It stops where the API stops and one step short of offline: a register is
+  submitted over a connection (there is no queue and no service worker), a recorded
+  entry cannot be corrected (no void route), and there are no screens for an athlete, a
+  platform administrator, users or roles
+  ([`apps/web/README.md`](./apps/web/README.md),
+  [ADR 0008](./docs/adr/0008-web-architecture.md),
+  [`docs/plans/frontend-v1.md`](./docs/plans/frontend-v1.md)).
+- **Backup cron, restore drill and backup-absence alerts.** Marked `STUB` in
+  `infra/terraform/stacks/<env>/base/backup.tf`. Front Door and private networking for
+  Postgres are written but unapplied, with their gaps (a rate-limit-only WAF, origins
+  reachable directly, no private endpoints for Key Vault, registry or storage) listed in
+  [`infra/terraform/README.md`](./infra/terraform/README.md).
 
 ## Assumptions made where the brief was silent
 
@@ -459,18 +813,34 @@ Scope choices, each one a decision rather than an omission:
 ```
 apps/
   api/                  NestJS — the one deployable
-    drizzle/            hand-written SQL migrations (schema, then RLS)
-    src/common/         tenancy, authz, HTTP concerns
+    drizzle/            hand-written SQL migrations (schema, RLS, then grants)
+    src/common/         tenancy, authz, validation, errors, HTTP concerns
     src/modules/        athletes · teams · sessions · auth
     test/               unit + Testcontainers integration
-  web/                  SPA build target (deliberately minimal)
+    src/openapi/        the route walk and the OpenAPI generator
+    openapi.json        GENERATED from the contracts and route metadata; committed
+  web/                  React + Vite SPA: sign-in, athletes, teams, sessions and attendance
+    src/routes/         thin route files: search schema, guard, loader
+    src/features/       one folder per feature, public through index.ts only
+    src/components/     shared composites; ui/ holds the shadcn primitives
+    src/lib/            generated API client, error mapper, auth, can()
+    e2e/                Playwright, against the compose stack
 packages/
   contracts/            Zod schemas — single source of truth
   config/               fail-fast env validation
+tooling/
+  eslint-config/        the type-aware lint gate, and why it is one
 infra/terraform/        Azure UAE North / UAE Central
+  modules/              container-app, postgres, static-site, edge
+  stacks/               shared (CI identity, state) · <env>/base (human-applied) · <env>/app (CI-applied)
 docs/                   the written proposal (A–E of the brief)
-scripts/                smoke check, demo seed, dev token minting
+  adr/                  decision records: the hardening work, then the web client
+  reference/            the generated route manifest
+  plans/                the phase-by-phase build record, deviations included
+scripts/                smoke check, demo data, dev accounts
 apps/api/Dockerfile     multi-stage, non-root, prod deps only
+apps/web/Dockerfile     the SPA behind nginx with /api proxied: one origin, for compose and e2e
 docker-compose.yml      local dev AND the single-server deployment answer
-.dependency-cruiser.cjs architecture fitness rules
+.dependency-cruiser.cjs architecture fitness rules (API layers, SPA features)
+lefthook.yml            pre-commit: the same lint and typecheck gates CI runs
 ```

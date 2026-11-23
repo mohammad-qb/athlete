@@ -1,49 +1,86 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Controller, Get, Post } from '@nestjs/common';
 import {
   CreateMembershipRequest,
   CreateTeamRequest,
+  IdParams,
+  MembershipResponse,
+  RosterQuery,
+  RosterResponse,
+  TeamListQuery,
+  TeamPage,
+  TeamResponse,
   TransferAthleteRequest,
-  type MembershipResponse,
-  type TeamResponse,
-  Uuid,
+  TransferResponse,
 } from '@athlete/contracts';
 import { TeamsService } from './teams.service';
-import { Authorize } from '../../common/authz/authorize.decorator';
-import { ZodValidationPipe } from '../../common/http/zod-validation.pipe';
+import { Permission } from '../../common/authz/permission.decorator';
+import { Responds } from '../../common/validation/responds.decorator';
+import {
+  Validate,
+  ValidBody,
+  ValidParams,
+  ValidQuery,
+} from '../../common/validation/validate.decorator';
 
 @Controller('teams')
 export class TeamsController {
   constructor(private readonly teams: TeamsService) {}
 
+  @Get()
+  @Permission({ action: 'read', subject: 'teams' })
+  @Validate({ query: TeamListQuery })
+  @Responds(TeamPage)
+  list(@ValidQuery() query: TeamListQuery): Promise<TeamPage> {
+    return this.teams.listTeams(query);
+  }
+
   @Post()
-  @Authorize({ roles: ['academy_admin'] })
-  createTeam(
-    @Body(new ZodValidationPipe(CreateTeamRequest)) body: CreateTeamRequest,
-  ): Promise<TeamResponse> {
+  @Permission({ action: 'create', subject: 'teams' })
+  @Validate({ body: CreateTeamRequest })
+  @Responds(TeamResponse)
+  create(@ValidBody() body: CreateTeamRequest): Promise<TeamResponse> {
     return this.teams.createTeam(body);
   }
 
+  /** So a roster page can be opened by its URL: the team's own name and sport. */
+  @Get(':id')
+  @Permission({ action: 'read', subject: 'teams' })
+  @Validate({ params: IdParams })
+  @Responds(TeamResponse)
+  getById(@ValidParams('id') id: string): Promise<TeamResponse> {
+    return this.teams.getTeam(id);
+  }
+
   @Post(':id/memberships')
-  @Authorize({ roles: ['academy_admin'] })
+  @Permission({ action: 'create', subject: 'teamMemberships' })
+  @Validate({ params: IdParams, body: CreateMembershipRequest })
+  @Responds(MembershipResponse)
   addMembership(
-    @Param('id', new ZodValidationPipe(Uuid)) teamId: string,
-    @Body(new ZodValidationPipe(CreateMembershipRequest)) body: CreateMembershipRequest,
+    @ValidParams('id') teamId: string,
+    @ValidBody() body: CreateMembershipRequest,
   ): Promise<MembershipResponse> {
     return this.teams.addMembership(teamId, body);
   }
 
   /** `at` defaults to now, so the same endpoint answers "who is on this team" and "who was". */
   @Get(':id/roster')
-  @Authorize({ roles: ['academy_admin', 'coach'] })
-  roster(@Param('id', new ZodValidationPipe(Uuid)) teamId: string, @Query('at') at?: string) {
-    return this.teams.rosterAt(teamId, at ? new Date(at) : new Date());
+  @Permission({ action: 'read', subject: 'teamMemberships' })
+  @Validate({ params: IdParams, query: RosterQuery })
+  @Responds(RosterResponse)
+  roster(
+    @ValidParams('id') teamId: string,
+    @ValidQuery() query: RosterQuery,
+  ): Promise<RosterResponse> {
+    // `at` has parsed as an ISO-8601 instant by the time it gets here, so this Date is
+    // never Invalid -- which is what used to reach the driver and come back as a 500.
+    return this.teams.rosterAt(teamId, query.at ? new Date(query.at) : new Date());
   }
 
   @Post('transfers')
-  @Authorize({ roles: ['academy_admin'] })
-  transfer(
-    @Body(new ZodValidationPipe(TransferAthleteRequest)) body: TransferAthleteRequest,
-  ) {
+  @Permission({ action: 'update', subject: 'teamMemberships' })
+  @Validate({ body: TransferAthleteRequest })
+  @Responds(TransferResponse)
+  transfer(@ValidBody() body: TransferAthleteRequest): Promise<TransferResponse> {
     return this.teams.transfer(body);
   }
 }

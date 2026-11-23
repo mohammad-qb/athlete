@@ -15,12 +15,14 @@
 | Repository | **pnpm workspaces + Turborepo** | Shared Zod contracts between API and SPA; cached CI tasks; nothing exotic to defend |
 | Database | **PostgreSQL 17** | RLS, GiST exclusion constraints over `tstzrange`, JSONB — three features this domain needs |
 | Data access | **Drizzle ORM** | SQL-first; migrations are editable `.sql`, which the guarantees require |
-| API | **REST + OpenAPI generated from Zod** | Readable without running it; `ETag`/`Idempotency-Key` are native; integrations free |
+| API | **REST + OpenAPI generated from Zod** | Readable without running it; `ETag`/`If-Match` are native; integrations free |
 | Client | **React + Vite SPA, static** | Keeps production at ONE Node process |
-| Auth | **Self-hosted auth library, own Postgres** | Identity PII stays in the UAE; flat cost |
+| Auth | **better-auth, self-hosted, own Postgres** | Identity PII stays in the UAE; flat cost |
+| Authorization | **CASL ability + a small condition→SQL compiler** | One policy gates routes and filters queries; see [02](./02-architecture.md) |
 | Hosting | **Azure UAE North + UAE Central** | Only provider with in-country primary *and* in-country DR |
 | IaC | **Terraform** | Keeps the portability claim credible |
 | Observability | **OpenTelemetry → Application Insights** | Telemetry stays in-region; vendor-neutral instrumentation |
+| Tooling | **Zod, Vitest, type-aware ESLint** | Each replaces a framework default on a stated ground; see [§10](#10-tooling-defaults-named) |
 
 ## 1. Runtime and framework — NestJS + TypeScript
 
@@ -122,13 +124,27 @@ transparency.
 ## 5. API style — REST + OpenAPI generated from the Zod contracts
 
 **Why.** The panel can read a spec without running it; `ETag`/`If-Match` (the
-optimistic-concurrency answer) and `Idempotency-Key` (the offline-write answer) are
-native REST mechanics rather than bolt-ons; responses are cacheable at the edge; and a
-future academy integration costs nothing. Type safety is preserved because the client is
-generated from the same Zod schemas the server validates with.
+optimistic-concurrency answer) is a native REST mechanic rather than a bolt-on;
+responses are cacheable at the edge; and a future academy integration costs nothing.
+Type safety is preserved because the client is generated from the same Zod schemas the
+server validates with.
+
+**What is built.** The whole chain, with nothing written twice
+([ADR 0007](./adr/0007-generated-contract-pipeline.md)). Every route declares the
+schemas of its input and of its response; [`apps/api/openapi.json`](../apps/api/openapi.json)
+is generated from those declarations by walking the real module graph, committed, and a
+unit test fails when it is stale; the SPA's typed client and its TanStack Query options
+are generated from that document by hey-api, committed, and CI fails when they are
+stale. The SPA's forms validate with the Zod schemas themselves.
+
+One correction to earlier drafts, which named an `Idempotency-Key` header as the
+retried-write answer: the API has no such header. A retried attendance submission is
+made safe in the body, by a client-generated `clientRecordId` on each entry that is
+unique per academy ([03 §3](./03-data-model.md)), which the contract can type and the
+database can enforce.
 
 **tRPC** — best DX for a TS monorepo and the fastest path to a working app. Rejected
-because there is no language-agnostic contract, and `ETag`/idempotency semantics sit
+because there is no language-agnostic contract, and `ETag`/`If-Match` semantics sit
 awkwardly on an RPC-shaped transport.
 
 **GraphQL** — attractive for dashboard screens that need athletes, sessions and
@@ -148,22 +164,92 @@ there is no SEO requirement and no public page, so SSR would buy nothing concret
 **Next.js** — better DX and the obvious default. Rejected because no benefit it delivers
 *for an authenticated dashboard* justifies a second deployable.
 
-Responsive web covers phones. Native mobile is deferred with a documented Expo path that
-reuses `packages/contracts`.
+Responsive web covers phones: the coach's attendance register is built for a 390px
+screen and tested at that width. Native mobile is deferred with a documented Expo path
+that reuses `packages/contracts`.
 
-## 7. Authentication — self-hosted library, users in our own Postgres
+**What is built.** `apps/web` is that SPA: React 19, Vite, TanStack Router, Query, Table
+and Form, shadcn/ui. One application for an academy administrator and a coach, covering
+everything the API offers: sign in and change password; athletes (list, add, edit, with
+one conflict dialog for a refused stale write); teams (list, create, roster as of a day,
+add, transfer); sessions (list, schedule) and the attendance register, which is marked
+into a draft kept on the device and submitted once, so a reload or a failed request
+loses nothing and a retry stores nothing twice. Under the screens sits what each of them
+reuses: the generated client, one error mapper, permissions read from `GET /me` (the
+policy itself never leaves the server), a server-driven list table, and form fields that
+take the server's validation messages. Its structure is enforced like the API's: thin
+routes over features that may not import each other, checked by dependency-cruiser
+([ADR 0008](./adr/0008-web-architecture.md)). In the compose stack an nginx container
+serves the bundle and proxies `/api`, reproducing the single origin Front Door provides;
+it is a local stand-in, not a second deployable. Not built: an offline queue (a
+submission needs a connection), and screens for an athlete or a platform administrator.
+See [`apps/web/README.md`](../apps/web/README.md).
 
-**Why.** Two hard constraints decide this. **Residency**: Clerk and Auth0 have no UAE
-region, so either would move identity PII out of the country and falsify the hosting
-claim. **Cost**: at ~5,300 users growing to 50,000, per-MAU pricing is a real line item
-where self-hosting is flat. A third reason is modelling: academy-scoped roles
+## 7. Authentication — better-auth, users in our own Postgres
+
+**Why self-hosted.** Two hard constraints decide this. **Residency**: Clerk and Auth0
+have no UAE region, so either would move identity PII out of the country and falsify the
+hosting claim. **Cost**: at ~5,300 users growing to 50,000, per-MAU pricing is a real
+line item where self-hosting is flat. A third reason is modelling: academy-scoped roles
 (`user_academy_roles`) map cleanly onto our own schema, where a generic IdP's
 organisation model would need bending.
 
-**The objection, answered directly:** this is not hand-rolled authentication. A
-maintained library handles argon2id hashing, session rotation and TOTP. What is
-deliberately *not* built: SSO, social login and SCIM — because no requirement asks for
-them.
+**The library is [better-auth](https://www.better-auth.com).** "A maintained library"
+is not an answer a reviewer can check, so it is named. What it brings, and what was
+confirmed rather than assumed:
+
+- **It is alive.** Checked on 22 November 2026: the 1.7 line is current on npm, released
+  within days of the check, with a 1.8 beta in progress. The check was not a
+  formality. **Lucia**, the library this paragraph would have named two years ago, was
+  deprecated as a library by its author in 2025 and now exists as a guide to writing
+  sessions yourself. A dead dependency in a technology proposal is worse than no name.
+- **Its tables live in our Postgres**, created by our own hand-written migrations like
+  every other table (`0003_auth.sql`). It is handed a `pg` pool and uses its built-in
+  query layer, **not its Drizzle adapter**: the adapter needs a newer `drizzle-orm`
+  than the API runs, and the auth tables are deliberately kept out of the schema the
+  application's queries are built from. Sessions are database rows, not self-contained
+  JWTs, so a session can be revoked and "sign out everywhere" is a `DELETE`.
+- **Password hashing is scrypt by default**, not argon2id. Both are memory-hard and
+  acceptable; argon2id is the current OWASP first choice and is available by supplying
+  the library's hash and verify functions. An earlier draft of this proposal said
+  "argon2id" as if it came in the box. It does not, and the configuration is one more
+  thing we own.
+- **TOTP** is a first-party plugin (with backup codes), enabled when a requirement asks.
+
+**The trade-off, stated.** better-auth reached 1.0 in late 2024. It is young, it
+releases often, and its minor versions remove things (the 1.7 notes deprecate an
+endpoint for removal in the next minor). So: the version is pinned exactly, upgrades
+are a reviewed change with the changelog read, and the risk of a breaking or abandoned
+release is ours. The exit is bounded because the data is ours: users, credentials and
+sessions sit in tables we migrate, so replacing the library is a code change, not a
+data migration out of someone else's service.
+
+**What is deliberately not built:** SSO, social login and SCIM, because no requirement
+asks for them.
+
+**Integrated**, pinned at 1.7.27
+([ADR 0006](./adr/0006-cookie-sessions-and-the-auth-role.md)). A person signs in at
+`/api/auth/sign-in/email` and receives an httpOnly, SameSite=Lax cookie naming a
+session row; the HMAC bearer token the slice used before is gone. The open question
+this section used to end on is settled the stricter way: `athlete_app` still holds
+nothing on `users` ([ADR 0004](./adr/0004-privilege-matrix-and-voiding.md)), and
+better-auth connects as a second role, `athlete_auth`, which holds identity and
+sessions and nothing tenant-owned. Three things it does not do by itself are ours: the
+academy a session acts in is a column only the server writes, roles are read from the
+database on every request rather than kept in the session, and state-changing requests
+to our own routes are origin-checked.
+
+Two facts about the library that the integration turned up, recorded because both are
+the kind a proposal gets wrong by assuming. **It is ESM-only** and this API compiles to
+CommonJS; it is loaded with a dynamic `import()`, which works in the built image, the
+dev runner and Vitest, and the API's module format did not have to change. **It
+switches its origin check off when it detects a test environment**, so the
+configuration states the check explicitly: otherwise the suite would exercise a more
+permissive library than the one deployed.
+
+**What v1 leaves out:** accounts are created by an operator CLI, not by sign-up or
+invitation, and there is no password reset by email, no email verification and no
+TOTP. Each needs outbound email or a requirement that does not exist yet.
 
 **AWS Cognito** — would keep residency if available in-region, but has poor developer
 experience and hard-couples to AWS. **Keycloak** — full OIDC in-country, but an entire
@@ -187,3 +273,84 @@ leaves the UAE in readable form* — is worth more than better exception triage.
 
 **Self-hosted Grafana/Prometheus/Loki** — rejected: an entire second system for a small
 team to run, and if it shares a region with the app it dies in the same event.
+
+## 10. Tooling defaults, named
+
+Three places where the framework's default tool was not used. Each is a default, so
+each needs the same treatment as the larger choices: the alternative named, and the
+ground stated.
+
+### Validation — Zod, not class-validator + class-transformer
+
+Nest's documentation validates with decorated DTO classes. They are rejected here on
+four grounds, in order of how checkable they are.
+
+1. **CI forbids the shape they require.** A PATCH body is "the create shape, every
+   field optional". With class DTOs that is `PartialType(CreateAthleteDto)`, and
+   `PartialType` comes from `@nestjs/mapped-types`. `packages/contracts` is shared with
+   the browser, and the `contracts-stay-pure` boundary rule fails the build on any
+   `packages/contracts → @nestjs/*` import. So with class DTOs every patch shape either
+   breaks that rule or is written out a second time by hand. With Zod it is
+   `patchOf(schema)`: derived, in the shared package, with no framework import.
+2. **No inference.** A decorated class is a type and a set of rules that agree only
+   because someone kept them in step: `@IsString()` on a property typed `number`
+   compiles. A Zod schema is the rule, and `z.infer` is the type.
+3. **A runtime requirement the rest of the stack does not have.** class-validator needs
+   `class-transformer` to turn a plain body into a class instance, plus
+   `reflect-metadata` and `emitDecoratorMetadata`. Nest's own dependency injection
+   already needs the last two in `apps/api`; the shared package and the SPA do not, and
+   would acquire them.
+4. **Sharing does not work in either direction.** Import the DTO classes into the SPA
+   at runtime and the decorators and their metadata runtime ship to the browser. Import
+   them as types only and nothing is validated on the client at all.
+
+What is **not** claimed: that class-validator cannot express refinements, unions or
+cross-field rules. It can, through custom constraint classes. The argument is about
+where the definition lives and what it drags with it, not about expressiveness.
+
+**Trade-off accepted.** Nest's built-in `ValidationPipe` and the Swagger plugin's DTO
+introspection are given up. Validation is instead a declared route property
+(`@Validate`) read by one global interceptor, which fails closed when a route forgets
+it ([02](./02-architecture.md#cross-cutting-concerns-and-where-each-one-lives)), and
+the OpenAPI document is generated from the same Zod schemas and the routes' own
+declarations (`apps/api/src/openapi/`), committed as `apps/api/openapi.json` and checked
+for drift by a test.
+
+### Test runner — Vitest, not Jest
+
+Nest's CLI scaffolds Jest. Vitest was chosen because it runs TypeScript and ES modules
+without a transform layer to configure (`ts-jest` or Babel, each with its own module
+settings to keep in step with `tsconfig`), and because a sub-second unit run is what
+makes "run the tests" a habit rather than a step.
+
+**The cost is real and was paid.** Vitest compiles with esbuild, which does not emit
+decorator metadata, so Nest's injector cannot construct this application's real
+controllers under test. Two consequences are visible in the suite: the HTTP-level
+validation spec runs against a fixture controller whose providers are built by
+factory, and
+the real routes are held to their declarations by a static walk of the module graph
+(`authz.route-coverage`) plus the smoke script over the running container. If a test
+ever needs the real application booted in-process, the route is an SWC transform for
+Vitest. Jest with `ts-jest` would not have had this problem. It was judged a fair
+price, and it is written here because it is the first thing a Nest developer will trip
+on.
+
+### Lint — typescript-eslint with type information, not a syntax-only linter
+
+The gate exists for one rule. An authorization assertion that returns a promise and has
+lost its `await` type-checks, returns 200, and skips the check. This was demonstrated,
+not supposed: removing the `await` passed `typecheck` and failed `lint`. Only
+`no-floating-promises` catches it, and that rule needs the TypeScript checker's types.
+So ESLint runs with `projectService` on, and `no-floating-promises`,
+`no-misused-promises` and `require-await` are errors
+([`tooling/eslint-config`](../tooling/eslint-config/README.md)).
+
+Faster linters were the alternative: **Biome** and **oxlint** are both far quicker.
+They were not chosen because the one rule that matters has to agree with the compiler
+about what is a promise, and at the time of writing neither runs on the TypeScript
+checker itself. The price is a lint pass that costs about as much as a type-check. It
+is cached by Turborepo and runs pre-commit on staged packages only.
+
+There is **no formatter** in the repository. Prettier is the default companion and
+adding it is a repo-wide diff that proves nothing in a proposal; a team adopting this
+would add one on day one.

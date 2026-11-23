@@ -1,93 +1,426 @@
 import 'reflect-metadata';
-import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { Body, Controller, Get, Module, Param, Patch, Post } from '@nestjs/common';
+import { Action, AthleteResponse, Subject } from '@athlete/contracts';
 import { describe, expect, it } from 'vitest';
-import { AppModule } from '../src/app.module';
-import { AUTHZ_METADATA, PUBLIC_METADATA } from '../src/common/authz/authorize.decorator';
-
-type Ctor = new (...args: never[]) => unknown;
+import { z, type ZodType } from 'zod';
+import { API_GLOBAL_PREFIX, AppModule } from '../src/app.module';
+import { Authenticated, Permission, Public } from '../src/common/authz/permission.decorator';
+import { IfMatch } from '../src/common/http/if-match.decorator';
+import { Responds } from '../src/common/validation/responds.decorator';
+import { Validate, VALIDATION_SLOTS, ValidBody } from '../src/common/validation/validate.decorator';
+import { collectRoutes as walk, successStatus, type Ctor, type Route } from '../src/openapi/routes';
 
 /**
- * PROVES: no route can reach production without an authorization decision.
+ * PROVES: no route can reach production without an authorization decision, and the
+ * decisions that exist are written in the policy's real vocabulary.
  *
  * Deny-by-default already fails such a request at runtime. This test makes it fail in
  * CI instead -- so "we forgot the guard on the new endpoint" is a red build rather than
  * an incident. It walks the real module graph, so adding a controller anywhere is
  * covered automatically; there is no list here to forget to update.
  *
+ * The walk itself lives in `src/openapi/routes.ts`, because the OpenAPI generator reads
+ * the same routes: what this test checks and what the document publishes are one list.
+ *
  * It needs no database: it reads decorator metadata only.
  */
-function collectControllers(module: Ctor, seen = new Set<Ctor>()): Ctor[] {
-  if (seen.has(module)) return [];
-  seen.add(module);
+const collectRoutes = (root: Ctor): Route[] => walk(root, API_GLOBAL_PREFIX);
 
-  const controllers: Ctor[] = [...((Reflect.getMetadata('controllers', module) as Ctor[]) ?? [])];
-  const imports = (Reflect.getMetadata('imports', module) as Ctor[]) ?? [];
+/**
+ * Subjects the policy names but no route operates on yet. Listed, rather than
+ * tolerated, so the vocabulary cannot grow ahead of the API unnoticed: a new subject
+ * must either be claimed by a route or be added here by someone who meant it.
+ *
+ *  - assessments       modelled and granted, API not in this slice
+ *  - userAcademyRoles  read-only by policy; role grants are not an API operation
+ */
+const RESERVED_SUBJECTS: Subject[] = ['assessments', 'userAcademyRoles'];
 
-  for (const imported of imports) {
-    if (typeof imported === 'function') {
-      controllers.push(...collectControllers(imported, seen));
-    }
-  }
-  return controllers;
+const MANIFEST_PATH = resolve(__dirname, '../../../docs/reference/route-manifest.md');
+
+/** A schema as the manifest names it: its contract id, `Id[]` for a list of one, else `inline`. */
+function schemaName(schema: ZodType): string {
+  const id = z.globalRegistry.get(schema)?.id;
+  if (id) return id;
+  if (schema instanceof z.ZodArray) return `${schemaName(schema.element as ZodType)}[]`;
+  return 'inline';
 }
 
-/** Returns the prototype member only when it is a decorated route handler. */
-function handlerOf(controller: Ctor, name: string): object | undefined {
-  const prototype = controller.prototype as Record<string, unknown>;
-  const member = prototype[name];
-  if (typeof member !== 'function') return undefined;
-  return Reflect.getMetadata(METHOD_METADATA, member) === undefined ? undefined : member;
+/** `200 AthleteResponse + ETag`, `204 no body`, or the absence the coverage test fails on. */
+function respondsCell(route: Route): string {
+  if (!route.responds) return '**undeclared**';
+  const body = route.responds.schema ? schemaName(route.responds.schema) : 'no body';
+  return `${successStatus(route)} ${body}${route.responds.etag ? ' + ETag' : ''}`;
 }
 
-function routeHandlers(controller: Ctor): string[] {
-  const prototype = controller.prototype as Record<string, unknown>;
-  return Object.getOwnPropertyNames(prototype).filter(
-    (name) => name !== 'constructor' && handlerOf(controller, name) !== undefined,
-  );
+function renderManifest(routes: Route[]): string {
+  const rows = [...routes]
+    .sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method))
+    .map((route) => {
+      const kind = route.isPublic
+        ? '_public_'
+        : route.isAuthenticated
+          ? '_authenticated_'
+          : '**undeclared**';
+      const action = route.permission?.action ?? kind;
+      const subject = route.permission?.subject ?? kind;
+      const validates = VALIDATION_SLOTS.filter((slot) => route.validation[slot]).join(', ') || '—';
+      const input = route.ifMatch ? `${validates}, If-Match` : validates;
+      return `| ${route.method} | \`${route.path}\` | \`${route.name}\` | ${action} | ${subject} | ${input} | ${respondsCell(route)} |`;
+    });
+
+  return [
+    '# Route manifest',
+    '',
+    '<!-- GENERATED by apps/api/test/authz.route-coverage.spec.ts. Do not edit by hand. -->',
+    '',
+    'Every HTTP route in `apps/api`, as a client calls it (global prefix',
+    `\`/${API_GLOBAL_PREFIX}\` included), with the operation it declares to the authorization`,
+    'guard. Generated from the same decorator metadata the guard reads, by walking the real',
+    'module graph; the test fails when this file and the code disagree, so a change to the',
+    'API surface or to what a route demands is always a reviewed diff here.',
+    '',
+    'Who holds each `(action, subject)` pair is decided in one place:',
+    '[`apps/api/src/common/authz/ability.ts`](../../apps/api/src/common/authz/ability.ts).',
+    '`_public_` admits anyone; `_authenticated_` admits any signed-in user and is for',
+    'routes about the caller rather than about a resource.',
+    '',
+    'better-auth\'s own routes under `/api/auth/*` (sign-in, sign-out, change password) are',
+    'mounted beneath Nest and are not listed: they are the library\'s API, authenticated',
+    'and origin-checked by the library. See `docs/adr/0006-cookie-sessions-and-the-auth-role.md`.',
+    '',
+    '"Validates" lists the parts of the request the route declares a schema for with',
+    '`@Validate`. A handler can only read a part that is listed: the `@Valid*` parameter',
+    'decorators refuse an undeclared one at runtime, and the same test fails the build first.',
+    '`If-Match` marks a route that requires the version being edited.',
+    '',
+    '"Responds" is the success status and the schema the route declares with `@Responds`.',
+    'Every response is encoded through it, so a field the schema does not name is never',
+    'sent; `+ ETag` marks a route that also returns the resource version as a header. The',
+    'schemas themselves are published in [`apps/api/openapi.json`](../../apps/api/openapi.json),',
+    'generated from the same walk.',
+    '',
+    'Regenerate with:',
+    '',
+    '```bash',
+    'UPDATE_ROUTE_MANIFEST=1 pnpm --filter @athlete/api run test',
+    '```',
+    '',
+    '| Method | Path | Handler | Action | Subject | Validates | Responds |',
+    '|---|---|---|---|---|---|---|',
+    ...rows,
+    '',
+  ].join('\n');
 }
 
 describe('authorization route coverage', () => {
-  const controllers = collectControllers(AppModule as unknown as Ctor);
+  const routes = collectRoutes(AppModule);
 
-  it('discovers the controllers in the module graph', () => {
-    expect(controllers.length).toBeGreaterThan(0);
+  it('discovers the routes in the module graph', () => {
+    expect(routes.length).toBeGreaterThan(0);
   });
 
-  it('every route declares either @Authorize or @Public', () => {
-    const undeclared: string[] = [];
+  /** How many of @Permission, @Authenticated and @Public the route carries. The guard admits exactly one. */
+  const declarations = (route: Route) =>
+    [route.permission !== undefined, route.isAuthenticated, route.isPublic].filter(Boolean).length;
 
-    for (const controller of controllers) {
-      const basePath = Reflect.getMetadata(PATH_METADATA, controller) ?? '';
-      for (const handlerName of routeHandlers(controller)) {
-        const handler = handlerOf(controller, handlerName);
-        if (!handler) continue;
-        const hasAuthorize = Reflect.getMetadata(AUTHZ_METADATA, handler) !== undefined;
-        const isPublic = Reflect.getMetadata(PUBLIC_METADATA, handler) !== undefined;
-        if (!hasAuthorize && !isPublic) {
-          undeclared.push(`${String(basePath)}/${controller.name}.${handlerName}`);
-        }
-      }
-    }
+  it('every route declares @Permission, @Authenticated or @Public', () => {
+    const undeclared = routes
+      .filter((route) => declarations(route) === 0)
+      .map((route) => `${route.method} ${route.path} (${route.name})`);
 
     expect(
       undeclared,
       `Routes with no authorization decision:\n  ${undeclared.join('\n  ')}\n` +
-        'Add @Authorize({ roles: [...] }) or @Public().',
+        'Add @Permission({ action, subject }), @Authenticated() or @Public().',
     ).toEqual([]);
+  });
+
+  it('no route declares more than one: two declarations disagree about who may call it', () => {
+    const several = routes.filter((route) => declarations(route) > 1).map((r) => r.name);
+    expect(several).toEqual([]);
+  });
+
+  it('reads controller-level metadata as the guard does', () => {
+    @Public()
+    @Controller('open')
+    class OpenController {
+      @Get()
+      @Permission({ action: 'read', subject: 'athletes' })
+      contradictory(): void {}
+    }
+    @Permission({ action: 'read', subject: 'teams' })
+    @Controller('gated')
+    class GatedController {
+      @Get()
+      inherited(): void {}
+      @Get('own')
+      @Permission({ action: 'read', subject: 'athletes' })
+      overridden(): void {}
+    }
+    @Module({ controllers: [OpenController, GatedController] })
+    class FixtureModule {}
+
+    const found = Object.fromEntries(collectRoutes(FixtureModule).map((route) => [route.name, route]));
+
+    // The guard refuses this route at runtime; here it must surface as the contradiction.
+    expect(found['OpenController.contradictory']).toMatchObject({
+      isPublic: true,
+      permission: { action: 'read', subject: 'athletes' },
+    });
+    expect(declarations(found['OpenController.contradictory'] as Route)).toBe(2);
+    expect(found['GatedController.inherited']).toMatchObject({
+      isPublic: false,
+      permission: { action: 'read', subject: 'teams' },
+    });
+    expect(found['GatedController.overridden']?.permission?.subject).toBe('athletes');
+  });
+
+  it('every declared (action, subject) exists in the contracts enums', () => {
+    // The decorator is typed, so this cannot fail from honest code. It is here for the
+    // dishonest kind: an `as never` cast, or metadata set without the decorator.
+    const invalid = routes
+      .filter((route) => route.permission !== undefined)
+      .filter(
+        (route) =>
+          !Action.safeParse(route.permission?.action).success ||
+          !Subject.safeParse(route.permission?.subject).success,
+      )
+      .map((route) => `${route.name}: ${JSON.stringify(route.permission)}`);
+    expect(invalid).toEqual([]);
+  });
+
+  it('every subject is claimed by a route or explicitly reserved', () => {
+    const claimed = new Set(routes.map((route) => route.permission?.subject));
+    const unaccounted = Subject.options.filter(
+      (subject) => !claimed.has(subject) && !RESERVED_SUBJECTS.includes(subject),
+    );
+    expect(
+      unaccounted,
+      `Subjects no route uses: ${unaccounted.join(', ')}. Claim them or add to RESERVED_SUBJECTS.`,
+    ).toEqual([]);
+  });
+
+  it('a reserved subject is removed from the reserve once a route claims it', () => {
+    const claimed = new Set(routes.map((route) => route.permission?.subject));
+    expect(RESERVED_SUBJECTS.filter((subject) => claimed.has(subject))).toEqual([]);
   });
 
   it('keeps the set of @Public routes small and intentional', () => {
     // A growing public surface is the quiet way an authorization model erodes, so the
     // allowlist is asserted explicitly: adding to it requires editing this test.
-    const publicRoutes: string[] = [];
-    for (const controller of controllers) {
-      for (const handlerName of routeHandlers(controller)) {
-        const handler = handlerOf(controller, handlerName);
-        if (handler && Reflect.getMetadata(PUBLIC_METADATA, handler) !== undefined) {
-          publicRoutes.push(`${controller.name}.${handlerName}`);
-        }
-      }
-    }
+    const publicRoutes = routes.filter((route) => route.isPublic).map((route) => route.name);
     expect(publicRoutes.sort()).toEqual(['HealthController.live']);
+  });
+
+  it('keeps the set of @Authenticated routes small and intentional', () => {
+    // @Authenticated skips the policy altogether, so it is for routes about the caller
+    // and nothing else. A route that touches a resource names a permission.
+    const authenticated = routes.filter((route) => route.isAuthenticated).map((route) => route.name);
+    expect(authenticated.sort()).toEqual(['MeController.read', 'MeController.switchAcademy']);
+  });
+
+  it('sees @Authenticated on a handler and on a controller', () => {
+    @Authenticated()
+    @Controller('self')
+    class SelfController {
+      @Get()
+      inherited(): void {}
+    }
+    @Controller('mixed')
+    class MixedController {
+      @Get()
+      @Authenticated()
+      own(): void {}
+    }
+    @Module({ controllers: [SelfController, MixedController] })
+    class FixtureModule {}
+
+    const found = Object.fromEntries(collectRoutes(FixtureModule).map((route) => [route.name, route]));
+    expect(found['SelfController.inherited']).toMatchObject({ isAuthenticated: true, isPublic: false });
+    expect(found['MixedController.own']).toMatchObject({ isAuthenticated: true, permission: undefined });
+  });
+
+  it('docs/reference/route-manifest.md matches the routes in the code', () => {
+    const expected = renderManifest(routes);
+
+    if (process.env.UPDATE_ROUTE_MANIFEST === '1') {
+      mkdirSync(dirname(MANIFEST_PATH), { recursive: true });
+      writeFileSync(MANIFEST_PATH, expected);
+    }
+
+    const committed = existsSync(MANIFEST_PATH) ? readFileSync(MANIFEST_PATH, 'utf8') : '';
+    expect(
+      committed,
+      'Route manifest is out of date. Run: UPDATE_ROUTE_MANIFEST=1 pnpm --filter @athlete/api run test',
+    ).toBe(expected);
+  });
+});
+
+/**
+ * PROVES: every route that takes input declares a schema for it, and no handler has a
+ * way to read input that skipped one.
+ *
+ * This is the static half. It shows a declaration exists; `validation.http.spec.ts`
+ * shows the declaration is enforced on a real request.
+ */
+describe('validation route coverage', () => {
+  const routes = collectRoutes(AppModule);
+  const label = (route: Route) => `${route.method} ${route.path} (${route.name})`;
+
+  it('no handler reads input through @Body, @Param or @Query', () => {
+    // Those hand over the raw request. The only sanctioned readers are the @Valid*
+    // decorators, which read what the interceptor parsed.
+    const raw = routes
+      .filter((route) => route.rawInputs.length > 0)
+      .map((route) => `${label(route)}: ${route.rawInputs.join(', ')}`);
+    expect(raw).toEqual([]);
+  });
+
+  it('every part of the request a handler reads has a declared schema', () => {
+    const undeclared = routes.flatMap((route) =>
+      route.reads
+        .filter((slot) => !route.validation[slot])
+        .map((slot) => `${label(route)} reads ${slot} without @Validate({ ${slot} })`),
+    );
+    expect(undeclared).toEqual([]);
+  });
+
+  it('every route that takes a body declares a body schema', () => {
+    const missing = routes
+      .filter((route) => ['POST', 'PUT', 'PATCH'].includes(route.method))
+      .filter((route) => !route.validation.body)
+      .map(label);
+    expect(missing).toEqual([]);
+  });
+
+  it('every route with a path parameter declares a params schema', () => {
+    const missing = routes
+      .filter((route) => route.path.includes(':'))
+      .filter((route) => !route.validation.params)
+      .map(label);
+    expect(missing).toEqual([]);
+  });
+
+  it('every declared schema refuses an unknown key', () => {
+    // A stripping schema is how a misspelled field became a successful no-op.
+    const lenient = routes.flatMap((route) =>
+      VALIDATION_SLOTS.filter((slot) => {
+        const result = route.validation[slot]?.safeParse({ __not_a_field__: 1 });
+        return (
+          result !== undefined &&
+          !result.error?.issues.some((issue) => issue.code === 'unrecognized_keys')
+        );
+      }).map((slot) => `${label(route)}: ${slot} schema is not strict`),
+    );
+    expect(lenient).toEqual([]);
+  });
+
+  it('sees raw decorators and undeclared reads, so the checks above can fail', () => {
+    @Controller('fixture')
+    class FixtureController {
+      @Post('raw/:id')
+      raw(@Body() _body: unknown, @Param('id') _id: string): void {}
+      @Post('undeclared')
+      undeclared(@ValidBody() _body: unknown): void {}
+      @Post('declared')
+      @Validate({ body: Action })
+      declared(@ValidBody() _body: unknown): void {}
+    }
+    @Module({ controllers: [FixtureController] })
+    class FixtureModule {}
+
+    const found = Object.fromEntries(collectRoutes(FixtureModule).map((route) => [route.name, route]));
+
+    expect(found['FixtureController.raw']?.rawInputs.sort()).toEqual(['@Body', '@Param']);
+    expect(found['FixtureController.undeclared']).toMatchObject({ reads: ['body'], validation: {} });
+    expect(found['FixtureController.declared']?.validation.body).toBe(Action);
+  });
+});
+
+/**
+ * PROVES: every route declares what it answers with, so nothing leaves the API in a
+ * shape nobody wrote down -- and the OpenAPI document has a response for every route.
+ *
+ * Static half again: `response.http.spec.ts` shows the declaration is enforced.
+ */
+describe('response route coverage', () => {
+  const routes = collectRoutes(AppModule);
+  const label = (route: Route) => `${route.method} ${route.path} (${route.name})`;
+  const undeclared = (found: Route[]) => found.filter((route) => !route.responds).map(label);
+
+  /** A route that promises an ETag must return something with a version to make it from. */
+  const etagWithoutVersion = (found: Route[]) =>
+    found
+      .filter((route) => route.responds?.etag)
+      .filter((route) => {
+        const schema = route.responds?.schema;
+        return !(schema instanceof z.ZodObject) || !('version' in schema.shape);
+      })
+      .map(label);
+
+  it('every route declares @Responds', () => {
+    expect(
+      undeclared(routes),
+      'Routes with no response schema. Add @Responds(<schema>), or @Responds(null) for no body.',
+    ).toEqual([]);
+  });
+
+  it('every route that returns an ETag declares a versioned response', () => {
+    expect(etagWithoutVersion(routes)).toEqual([]);
+  });
+
+  it('every route that requires If-Match returns the new version as an ETag', () => {
+    // Otherwise a client that has just written holds no version to write again with.
+    const missing = routes.filter((route) => route.ifMatch && !route.responds?.etag).map(label);
+    expect(missing).toEqual([]);
+  });
+
+  it('sees a route without @Responds, so the checks above can fail', () => {
+    @Controller('fixture')
+    class FixtureController {
+      @Get('forgot')
+      forgot(): void {}
+      @Get('declared')
+      @Responds(AthleteResponse, { etag: true })
+      declared(): void {}
+      @Get('unversioned')
+      @Responds(z.object({ id: z.string() }), { etag: true })
+      unversioned(): void {}
+      @Post('nothing')
+      @Responds(null)
+      nothing(): void {}
+      @Patch('edit')
+      @Responds(AthleteResponse, { status: 202 })
+      edit(@IfMatch() _version: number): void {}
+    }
+    @Module({ controllers: [FixtureController] })
+    class FixtureModule {}
+
+    const found = collectRoutes(FixtureModule);
+    const byName = Object.fromEntries(found.map((route) => [route.name, route]));
+
+    expect(undeclared(found)).toEqual(['GET /api/v1/fixture/forgot (FixtureController.forgot)']);
+    expect(etagWithoutVersion(found)).toEqual([
+      'GET /api/v1/fixture/unversioned (FixtureController.unversioned)',
+    ]);
+    expect(byName['FixtureController.declared']?.responds).toMatchObject({
+      schema: AthleteResponse,
+      etag: true,
+    });
+    expect(byName['FixtureController.nothing']?.responds).toMatchObject({ schema: null, status: 204 });
+    expect(byName['FixtureController.edit']).toMatchObject({ ifMatch: true });
+    expect(successStatus(byName['FixtureController.edit'] as Route)).toBe(202);
+    expect(respondsCell(byName['FixtureController.forgot'] as Route)).toBe('**undeclared**');
+  });
+
+  it('prints Nest\'s default status when a route declares none: 201 for a POST, else 200', () => {
+    const status = (name: string) => successStatus(routes.find((route) => route.name === name) as Route);
+    expect(status('AthletesController.create')).toBe(201);
+    expect(status('AthletesController.list')).toBe(200);
+    // Declared, because nothing is created: the session moves.
+    expect(status('MeController.switchAcademy')).toBe(200);
   });
 });

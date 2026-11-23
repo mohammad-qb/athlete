@@ -17,8 +17,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
 
       - uses: actions/setup-node@v4
         with:
@@ -33,24 +31,46 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
+      # Type-aware lint, and the reason it is a separate gate from typecheck: an
+      # authorization assertion whose `await` has been deleted type-checks cleanly and
+      # returns 200, so only `no-floating-promises` catches it. See
+      # tooling/eslint-config/nest.js for the full argument.
+      - name: Lint
+        run: pnpm run lint
+
       # The architecture fitness check. A violated layer boundary fails the build.
       - name: Architecture boundaries
         run: pnpm run lint:boundaries
 
       - name: Unit tests
         run: pnpm --filter @athlete/api run test
-        env:
-          DATABASE_URL: postgres://unused:unused@localhost:5432/unused
-          SESSION_SECRET: ci-session-secret-at-least-32-characters
+
+      # The SPA's logic and components in jsdom: the error mapper, permissions, the
+      # list table, the forms, and the styling rules (logical classes, light theme only).
+      - name: Web unit tests
+        run: pnpm --filter @athlete/web run test
+
+      # The typed web client is generated from apps/api/openapi.json, which the unit
+      # tests above have just checked against the code. Regenerating here and diffing
+      # closes the other half: a contract change committed without its client is a red
+      # build, not a type the browser code silently no longer matches.
+      - name: Generated API client is current
+        run: |
+          pnpm --filter @athlete/web run generate
+          git diff --exit-code apps/web/src/lib/api/generated
+
+      # The production bundle builds, and the committed route tree (generated from
+      # src/routes by the router's Vite plugin) is the one the build produces.
+      - name: Web build, and the route tree is current
+        run: |
+          pnpm --filter @athlete/web run build
+          git diff --exit-code apps/web/src/routeTree.gen.ts
 
       # Integration tests start a real Postgres via Testcontainers. The guarantees being
       # asserted (RLS, exclusion constraints, composite FKs) exist in the database, so
       # testing them against anything else would prove nothing.
       - name: Integration tests (Testcontainers + real Postgres)
         run: pnpm --filter @athlete/api run test:integration
-        env:
-          SESSION_SECRET: ci-session-secret-at-least-32-characters
-          DATABASE_URL: postgres://unused:unused@localhost:5432/unused
 
   # Wiring check. Separate from `verify` because it exercises a different class of
   # defect: the integration suite asserts database guarantees directly and cannot catch
@@ -93,6 +113,129 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  # The SPA in a real browser against the real stack: the compose `web` service serves
+  # the built bundle and proxies /api to the API on one origin, as Front Door does in
+  # production. Nothing is mocked, so this is the job that notices a cookie that is not
+  # sent, an origin the API refuses, or a route the proxy does not forward.
+  e2e:
+    name: End-to-end (Playwright, containerised stack)
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install the browser
+        run: pnpm --filter @athlete/web exec playwright install --with-deps chromium
+
+      - name: Start the stack
+        run: docker compose up -d --build
+
+      - name: Run migrations as their own step
+        run: docker compose run --rm migrate
+
+      - name: Wait for the API, through the web origin
+        run: |
+          for i in $(seq 1 40); do
+            curl -fsS http://localhost:8080/api/v1/health && exit 0
+            sleep 3
+          done
+          echo "API did not become healthy"; docker compose logs api web; exit 1
+
+      # Accounts exist only through the operator CLI; this is that CLI.
+      - name: Seed demo data and accounts
+        run: ./scripts/seed-dev.sh
+
+      - name: Playwright
+        run: pnpm --filter @athlete/web run test:e2e
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          retention-days: 7
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # Static verification of infra/terraform. It never plans against Azure and never
+  # applies: there is no subscription, and this job holds no cloud credential at all.
+  # What it does prove is listed in infra/terraform/README.md under "What has been
+  # verified" -- and so is what it does not.
+  terraform:
+    name: Terraform (fmt, validate, mocked plan, tflint)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.2
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      # Stacks are discovered, not listed, so a new stack cannot be left out. Modules
+      # are validated through the stacks that call them.
+      # -lockfile=readonly: a missing or stale .terraform.lock.hcl fails here instead
+      # of being silently regenerated on the runner.
+      - name: terraform validate (every stack)
+        run: |
+          for stack in $(find stacks -name versions.tf -not -path '*/.terraform/*' -exec dirname {} \; | sort); do
+            echo "::group::validate $stack"
+            terraform -chdir="$stack" init -backend=false -input=false -lockfile=readonly
+            terraform -chdir="$stack" validate
+            echo "::endgroup::"
+          done
+
+      # `terraform test` against a mocked azurerm provider: a full plan-time evaluation
+      # (references, for_each keys, validation rules) with no API call.
+      - name: terraform test (mocked provider, no credentials)
+        run: |
+          for dir in $(find modules stacks -type d -name tests -not -path '*/.terraform/*' -exec dirname {} \; | sort); do
+            echo "::group::test $dir"
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" test
+            echo "::endgroup::"
+          done
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.66.0
+
+      # --config is not optional: in --recursive mode tflint looks for .tflint.hcl in
+      # each directory it descends into, finds none, and falls back to the bundled
+      # rules only -- which passes while the azurerm ruleset never runs.
+      - name: tflint
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # avoids rate limiting on the ruleset download
+        run: |
+          tflint --init
+          tflint --recursive --config "$(pwd)/.tflint.hcl"
 
   # Deployment shape, included to show the sequencing rather than to run here.
   #

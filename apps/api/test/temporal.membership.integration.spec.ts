@@ -24,7 +24,7 @@ describe('temporal team membership', () => {
 
   beforeAll(async () => {
     db = await startTestDatabase();
-    academy = await seedAcademy(db.pool, 'Al Ain Youth Academy');
+    academy = await seedAcademy(db, 'Al Ain Youth Academy');
   }, 180_000);
 
   afterAll(async () => {
