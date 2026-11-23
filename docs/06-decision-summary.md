@@ -9,7 +9,7 @@ reasoning is available without re-deriving it.
 
 | # | Decision | Chosen | Rejected | Trade-off |
 |---|---|---|---|---|
-| 6 | API style | REST + OpenAPI generated from Zod | tRPC, GraphQL | More boilerplate than tRPC; no flexible querying. Gains a readable contract, native `ETag`/`Idempotency-Key`, free integrations. |
+| 6 | API style | REST + OpenAPI generated from Zod | tRPC, GraphQL | More boilerplate than tRPC; no flexible querying. Gains a readable contract, native `ETag`/`If-Match`, free integrations. |
 | 7 | Client rendering | Static Vite SPA | Next.js SSR, server-rendered templates | No SSR benefits (none needed). Keeps production at one Node process. |
 | 8 | Authentication | better-auth, self-hosted, own Postgres | Clerk, Auth0, Cognito, Keycloak; Lucia (deprecated) | We own password reset, lockout and MFA surface, and the upgrade risk of a young, fast-moving library (version pinned). Keeps identity PII in the UAE and cost flat. |
 | 9 | Authorization | **CASL**: one ability definition, asked coarsely by the route guard and compiled to row filters for every repository read | A static role→permission map with hand-written query filters; all in RLS; porting a sibling project's CASL→Drizzle adapter | Conditions must stay flat, so a coach's scope is resolved to id lists once per request (an `IN`-list ceiling). Gains one policy instead of a role check plus per-query filters that can drift apart. See below. |
@@ -18,7 +18,7 @@ reasoning is available without re-deriving it.
 | 12 | Error tracking | Application Insights only | Sentry (EU), self-hosted GlitchTip | Weaker triage UX. Keeps "no personal data leaves the UAE in readable form" true with no exceptions. |
 | 13 | IaC | Terraform | Bicep, Pulumi, manual | More ceremony than Bicep on an Azure-only deployment. Keeps the portability claim credible. |
 | 14 | Monorepo tooling | pnpm workspaces + Turborepo | Nx, Nest monorepo mode, separate repos | No Nx dependency graph or tag-based boundaries. Equivalent guarantee via dependency-cruiser, far less to justify. |
-| 15 | Offline support | Designed for, not built | Build offline sync now; ignore it entirely | No offline client today. The write API is already idempotent, so it becomes a feature rather than a rewrite. |
+| 15 | Offline support | Designed for, not built | Build offline sync now; ignore it entirely | No offline queue today: a submission needs a connection. The write API is idempotent and the web register already retries with the same ids, so offline becomes a feature rather than a rewrite. |
 
 ### Decision 9 was reversed, and this is the record of it
 
@@ -62,6 +62,15 @@ Made while hardening the slice; each has an ADR in [`adr/`](./adr/README.md).
 | 19 | Validation | Declared per route, on by default, fails closed | Per-parameter pipes; class-validator DTOs | A route that forgets is a 500 until fixed. Gains: a 200 never means "nothing happened". |
 | 20 | Terraform layout | `base` applied by humans, `app` by a deploy identity that cannot touch IAM or network | One flat config applied by CI with Contributor | Two applies per deploy and a routine `-target`. Gains a pipeline whose compromise is bounded. |
 
+## Decisions 21–22: the web client
+
+Made while building the SPA on the slice; each has an ADR.
+
+| # | Decision | Chosen | Rejected | Trade-off |
+|---|---|---|---|---|
+| 21 | Where the API's shape is written | Once, in the Zod contracts and route declarations; `openapi.json` and the typed client are generated from them, committed, and CI fails when stale ([ADR 0007](./adr/0007-generated-contract-pipeline.md)) | `@nestjs/swagger` DTO classes; a hand-written document; a second generated copy of the schemas for forms | Two regeneration commands and generated files in review; the generator is ours. Gains a client that stops compiling when a contract changes. |
+| 22 | Web client structure and policy | Thin routes over closed features, one of each cross-cutting concern, permissions read from `GET /me` and enforced only by the API ([ADR 0008](./adr/0008-web-architecture.md)) | Two apps, one per role; the ability definition shipped to the browser; per-screen error handling; an offline queue now | A control can be drawn that the API then refuses for a particular row; an attendance draft lives on one device and needs a connection to submit. Gains one policy, and screens that cannot drift apart. |
+
 ## Open questions for the client
 
 Listed rather than assumed — each one would change a decision above.
@@ -78,7 +87,10 @@ Listed rather than assumed — each one would change a decision above.
 4. **What are the actual RPO/RTO expectations?** We assumed 15 min / 4 h and justified
    the modesty. If the business needs tighter, the cost changes materially.
 5. **Do coaches need to record attendance offline?** We believe yes, from how academies
-   actually operate, and designed the API for it — but did not build the client.
+   actually operate, and designed the API for it. The web register goes part of the way:
+   marks are kept on the device and a failed submission can be repeated safely. What is
+   not built is sending without a connection (a queue and a service worker), and the
+   rule for two devices that filled in the same register.
 6. **Will academies integrate with external systems** (school management, payments,
    wearables)? If yes at launch, it strengthens REST + OpenAPI further and may justify
    webhooks.
@@ -97,11 +109,12 @@ In priority order, which is itself a statement about what we think matters:
 
 1. **Run the restore drill for real** and record the measured time — converting the RTO
    from an estimate into a number.
-2. **Finish the SPA's screens.** The OpenAPI document and the typed client are generated
-   from the Zod contracts and kept current by CI, and the SPA's foundation is built on
-   them: sign-in, the shell, athletes and teams (including the conflict dialog for a
-   refused stale write), and the patterns later screens reuse. Sessions and the
-   attendance register are not built yet.
+2. **Correcting a register, then offline attendance.** The SPA now covers what the API
+   offers: athletes, teams, sessions and the attendance register, on a client generated
+   from the Zod contracts. Two things a coach will ask for next are not there. A
+   recorded entry cannot be corrected, because voiding works at the database and has no
+   route. And a submission needs a connection: the draft and the idempotent write are
+   in place, the queue that sends when the connection returns is not.
 3. **Apply the Terraform to a real subscription.** It is validated and tested against
    a mocked provider and has never been planned against Azure; every permission list
    in it is reasoned, not exercised. Then close the edge gaps it names: managed WAF

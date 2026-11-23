@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { endOfDay, formatDate, startOfDay, startOfNextDay, today } from './dates';
+import {
+  addDays,
+  atLocalTime,
+  endOfDay,
+  formatDate,
+  formatDateTime,
+  formatTime,
+  startOfDay,
+  startOfNextDay,
+  today,
+} from './dates';
 
 describe('dates', () => {
   it('shows a calendar date as the day it names, whatever the zone', () => {
@@ -38,5 +48,29 @@ describe('dates', () => {
     expect(startOfDay('')).toBe('');
     expect(endOfDay('March')).toBe('March');
     expect(startOfNextDay('March')).toBe('March');
+  });
+
+  it('counts days on the calendar, across a month and a year', () => {
+    expect(addDays('2026-03-20', -14)).toBe('2026-03-06');
+    expect(addDays('2026-03-05', -14)).toBe('2026-02-19');
+    expect(addDays('2026-12-31', 1)).toBe('2027-01-01');
+    expect(addDays('soon', 1)).toBe('soon');
+  });
+
+  it('turns a day and a clock time into an instant in the local zone', () => {
+    expect(atLocalTime('2026-03-02', '17:05')).toBe(new Date(2026, 2, 2, 17, 5).toISOString());
+  });
+
+  it('gives nothing when the day or the time is missing, and passes on what it cannot read', () => {
+    expect(atLocalTime('', '17:00')).toBe('');
+    expect(atLocalTime('2026-03-02', '')).toBe('');
+    expect(atLocalTime('2026-03-02', 'noon')).toBe('2026-03-02Tnoon');
+  });
+
+  it('shows an instant as a day and a clock time where the reader is', () => {
+    const instant = new Date(2026, 2, 2, 17, 0).toISOString();
+    expect(formatDateTime(instant)).toBe('Mon 2 Mar 2026, 17:00');
+    expect(formatTime(instant)).toBe('17:00');
+    expect(formatDateTime('soon')).toBe('soon');
   });
 });

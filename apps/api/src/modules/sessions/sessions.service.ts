@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import type {
   CreateSessionRequest,
   ParticipationResponse,
@@ -10,6 +10,8 @@ import type {
 import { SessionsRepository, type ParticipantRow, type SessionRow } from './sessions.repository';
 import { TeamsRepository } from '../teams/teams.repository';
 import { assertCan } from '../../common/authz/assert-can';
+import { violatedConstraint } from '../../common/db/constraint-violation';
+import { ApiError, ApiErrorType } from '../../common/errors/api.error';
 import { requestContext } from '../../common/tenancy/request-context';
 
 @Injectable()
@@ -29,12 +31,14 @@ export class SessionsService {
       this.teams.accessFilter('read', 'teams'),
     );
     if (!team) throw new NotFoundException(`Team ${input.teamId} not found`);
-    const row = await this.repository.createSession({
-      teamId: input.teamId,
-      startsAt: new Date(input.startsAt),
-      endsAt: new Date(input.endsAt),
-      location: input.location,
-    });
+    const row = await asSessionRefusal(() =>
+      this.repository.createSession({
+        teamId: input.teamId,
+        startsAt: new Date(input.startsAt),
+        endsAt: new Date(input.endsAt),
+        location: input.location,
+      }),
+    );
     return toSessionResponse(row);
   }
 
@@ -87,27 +91,35 @@ export class SessionsService {
         memberships,
       );
       if (!wasMember) {
-        throw new BadRequestException(
-          `Athlete ${entry.athleteId} was not a member of team ${session.teamId} at ${session.startsAt.toISOString()}`,
-        );
+        throw new ApiError("An athlete was not on the session's team when it started", {
+          type: ApiErrorType.BAD_REQUEST,
+          code: 'athlete_not_on_team',
+          meta: { athleteId: entry.athleteId },
+          explanation:
+            'A register holds the athletes who were on the team at the start of the ' +
+            'session. Reload the register to see who that was.',
+        });
       }
     }
 
-    const rows = await this.repository.recordParticipation(
-      input.entries.map((entry) => ({
-        sessionId,
-        athleteId: entry.athleteId,
-        teamIdAtTime: session.teamId,
-        status: entry.status,
-        note: entry.note,
-        clientRecordId: entry.clientRecordId,
-        recordedByUserId: userId,
-      })),
+    const rows = await asSessionRefusal(() =>
+      this.repository.recordParticipation(
+        input.entries.map((entry) => ({
+          sessionId,
+          athleteId: entry.athleteId,
+          teamIdAtTime: session.teamId,
+          status: entry.status,
+          note: entry.note,
+          clientRecordId: entry.clientRecordId,
+          recordedByUserId: userId,
+        })),
+      ),
     );
 
-    // Replayed submissions insert nothing; return the stored register either way so the
-    // client converges on server state rather than guessing.
-    if (rows.length === 0) {
+    // A replay inserts only the entries that are not stored yet, possibly none. The
+    // answer is the stored register whenever anything was replayed, so the client
+    // converges on server state rather than guessing which of its entries were new.
+    if (rows.length < input.entries.length) {
       return this.storedRegister(sessionId);
     }
     return rows.map(toParticipationResponse);
@@ -134,6 +146,43 @@ export class SessionsService {
       this.repository.accessFilter('read', 'sessionParticipants'),
     );
     return rows.map(toParticipationResponse);
+  }
+}
+
+/**
+ * Rules the DATABASE enforces on these writes (`0000_init.sql`, `0002_grants.sql`).
+ * Left alone, a write that breaks one fails in the driver and is answered as a redacted
+ * 500, which tells a coach holding a phone nothing. Each is named here with what it
+ * means to the caller; anything else is rethrown. (Same shape as the membership
+ * refusals in `teams.service.ts`.)
+ */
+const SESSION_REFUSALS: Record<string, () => ApiError> = {
+  training_sessions_time_valid: () =>
+    new ApiError('A session must end after it starts', {
+      type: ApiErrorType.BAD_REQUEST,
+      code: 'session_time_invalid',
+    }),
+  // The same athlete, recorded for this session under a DIFFERENT clientRecordId: a
+  // second device, or a second coach. A replay of the same id never gets here; it is a
+  // no-op. Nothing of the request is stored: the statement failed as a whole.
+  session_participants_once_per_session: () =>
+    new ApiError('Attendance is already recorded for an athlete in this register', {
+      type: ApiErrorType.CONFLICT,
+      code: 'attendance_already_recorded',
+      explanation:
+        'Someone else recorded part of this register. Reload it, then submit the ' +
+        'athletes who are still unmarked.',
+    }),
+};
+
+async function asSessionRefusal<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    const constraint = violatedConstraint(error);
+    const refusal = constraint === undefined ? undefined : SESSION_REFUSALS[constraint];
+    if (!refusal) throw error;
+    throw refusal();
   }
 }
 

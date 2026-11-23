@@ -102,3 +102,31 @@ export async function createAthlete(
   expect(response.status(), 'create athlete').toBe(201);
   return (await response.json()) as { id: string };
 }
+
+/** Puts an athlete on a team for a period, as whoever `request` is signed in as. */
+export async function addMembership(
+  request: APIRequestContext,
+  baseURL: string,
+  teamId: string,
+  membership: { athleteId: string; validFrom: string; validTo: string | null },
+) {
+  const response = await request.post(`/api/v1/teams/${teamId}/memberships`, {
+    headers: { Origin: baseURL },
+    data: membership,
+  });
+  expect(response.status(), 'add membership').toBe(201);
+}
+
+/** Creates a training session over HTTP, as whoever `request` is signed in as. */
+export async function createSession(
+  request: APIRequestContext,
+  baseURL: string,
+  session: { teamId: string; startsAt: string; endsAt: string; location?: string | null },
+): Promise<{ id: string }> {
+  const response = await request.post('/api/v1/sessions', {
+    headers: { Origin: baseURL },
+    data: session,
+  });
+  expect(response.status(), 'create session').toBe(201);
+  return (await response.json()) as { id: string };
+}

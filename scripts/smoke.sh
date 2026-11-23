@@ -247,6 +247,39 @@ check "a period filter is half-open [from, to)" 0       "$(page 'd.total' "$A" '
 check "sessions have nothing to search: q is 400" 400   "$(code -b "$A" "$BASE/sessions?q=pitch")"
 
 echo
+echo "Attendance (a register is recorded facts; a replayed submission is a no-op)"
+# Bodies are built in variables, for the reason given at the membership checks above.
+uuid() { node -e 'process.stdout.write(require("node:crypto").randomUUID())'; }
+REGISTER="$BASE/sessions/$SESSION_A/attendance"
+record() { # record <jar> <body>  -- prints the status
+  code -X POST -b "$1" -H "$JSON" -H "Origin: $ORIGIN" -d "$2" "$REGISTER"
+}
+RECORD_ID=$(uuid)
+ENTRY="{\"entries\":[{\"clientRecordId\":\"$RECORD_ID\",\"athleteId\":\"$ATHLETE\",\"status\":\"late\",\"note\":\"bus\"}]}"
+# The same clientRecordId again, as a phone retrying after a dropped connection would
+# send it -- here even claiming something else, to show the stored fact is what stands.
+REPLAY="{\"entries\":[{\"clientRecordId\":\"$RECORD_ID\",\"athleteId\":\"$ATHLETE\",\"status\":\"absent\"}]}"
+# The same athlete under a NEW id: a second device, not a retry.
+SECOND="{\"entries\":[{\"clientRecordId\":\"$(uuid)\",\"athleteId\":\"$ATHLETE\",\"status\":\"present\"}]}"
+# Team B's athlete, who was never on Team A.
+OUTSIDER="{\"entries\":[{\"clientRecordId\":\"$(uuid)\",\"athleteId\":\"88888888-8888-8888-8888-888888888888\",\"status\":\"present\"}]}"
+BACKWARDS="{\"teamId\":\"$TEAM_A\",\"startsAt\":\"2026-03-03T17:00:00Z\",\"endsAt\":\"2026-03-03T16:00:00Z\"}"
+check "a new register is empty"                 0       "$(json 'd.length' -b "$C" "$REGISTER")"
+check "the coach records attendance"            201     "$(record "$C" "$ENTRY")"
+check "the register holds the entry"            "1 late bus" "$(json 'd.length+" "+d[0].status+" "+d[0].note' -b "$C" "$REGISTER")"
+check "a replay of the same id is accepted"     201     "$(record "$C" "$REPLAY")"
+check "...and changes nothing"                  "1 late bus" "$(json 'd.length+" "+d[0].status+" "+d[0].note' -b "$C" "$REGISTER")"
+check "...answering with the stored register"   "1 late" "$(json 'd.length+" "+d[0].status' -X POST -b "$C" -H "$JSON" -H "Origin: $ORIGIN" -d "$REPLAY" "$REGISTER")"
+check "the same athlete under a new id is 409"  409     "$(record "$A" "$SECOND")"
+check "...typed attendance_already_recorded"    attendance_already_recorded "$(field code -X POST -b "$A" -H "$JSON" -H "Origin: $ORIGIN" -d "$SECOND" "$REGISTER")"
+check "an athlete who was not on the team is 400" 400   "$(record "$A" "$OUTSIDER")"
+check "...typed athlete_not_on_team"            athlete_not_on_team "$(field code -X POST -b "$A" -H "$JSON" -H "Origin: $ORIGIN" -d "$OUTSIDER" "$REGISTER")"
+check "the register still holds one entry"      1       "$(json 'd.length' -b "$A" "$REGISTER")"
+check "another academy cannot read the register" 404    "$(code -b "$B" "$REGISTER")"
+check "a session ending before it starts is 400" 400    "$(code -X POST -b "$A" -H "$JSON" -H "Origin: $ORIGIN" -d "$BACKWARDS" "$BASE/sessions")"
+check "...typed session_time_invalid"           session_time_invalid "$(field code -X POST -b "$A" -H "$JSON" -H "Origin: $ORIGIN" -d "$BACKWARDS" "$BASE/sessions")"
+
+echo
 echo "Responses (declared, and encoded through the declaration)"
 # The ETag is no longer set by a controller: it is made from the encoded body by the
 # response interceptor, so the last check here shows that interceptor is wired.
