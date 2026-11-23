@@ -35,6 +35,33 @@ adopted). The decisions made while hardening the slice each have a record in
 
 ---
 
+## Where each part of the brief is answered
+
+| The brief asks for | Where |
+|---|---|
+| **A. Technology selection**: choices, alternatives, trade-offs | [`docs/01-technology-stack.md`](./docs/01-technology-stack.md) |
+| **B. Architecture design**: components, business logic, maintainability, limitations | [Architecture](#architecture) below; [`docs/02-architecture.md`](./docs/02-architecture.md) ([limitations](./docs/02-architecture.md#limitations-of-this-architecture)) |
+| **C. Data and backend design**: integrity, history, concurrent updates, access between academies, APIs | [Data model](#data-model) and [request path](#request-path--where-tenancy-and-authorization-actually-happen) below; [`docs/03-data-model.md`](./docs/03-data-model.md); every route in [`docs/reference/route-manifest.md`](./docs/reference/route-manifest.md) |
+| **D. Scalability and reliability**: growth, bottlenecks, risks | [`docs/04-scalability-reliability.md`](./docs/04-scalability-reliability.md) ([bottleneck](./docs/04-scalability-reliability.md#if-the-database-becomes-the-bottleneck), [risks](./docs/04-scalability-reliability.md#the-most-significant-technical-risks)) |
+| **E. Deployment strategy**: hosting, environments, security, CI/CD, backups, recovery | [Deployment](#deployment) below; [`docs/05-deployment.md`](./docs/05-deployment.md) ([environments](./docs/05-deployment.md#environments), [CI/CD](./docs/05-deployment.md#cicd), [security](./docs/05-deployment.md#security), [backup and recovery](./docs/05-deployment.md#backup-and-the-rporto-table)) |
+| **Indicative monthly cost** | About **$430–560 a month** at launch on Azure UAE North, about $810–1,300 at 10×; the table and its assumptions are in [`docs/05-deployment.md`](./docs/05-deployment.md#indicative-monthly-cost) |
+| **Decision summary**: five decisions, alternatives, trade-offs | [Above](#the-five-most-important-technical-decisions); decisions 6–15 in [`docs/06-decision-summary.md`](./docs/06-decision-summary.md) |
+| **Diagrams**: architecture, data model/ERD, deployment, others | [Architecture](#architecture), [data model](#data-model), [request path](#request-path--where-tenancy-and-authorization-actually-happen), [deployment](#deployment) |
+| **Assumptions challenged or added** | [Assumptions made where the brief was silent](#assumptions-made-where-the-brief-was-silent) |
+
+The six discussion scenarios:
+
+| Scenario | Answer |
+|---|---|
+| The infrastructure budget is reduced by 40% | A reservation on the database plus dropping zone-redundant HA: [`docs/05-deployment.md`](./docs/05-deployment.md#when-the-budget-is-cut-by-40) |
+| The application must initially run on a single server | The same image under `docker compose`, about $80–100 a month: [Run the whole stack](#run-the-whole-stack--and-the-single-server-answer) |
+| The number of athletes grows to 50,000 | Nothing structural changes, and the sums say why: [`docs/04-scalability-reliability.md`](./docs/04-scalability-reliability.md#first-the-arithmetic) |
+| Two users update the same record simultaneously | `version` + `If-Match`, the second writer gets a 409: [`docs/03-data-model.md`](./docs/03-data-model.md#3-handling-concurrent-updates), proven by `concurrency.optimistic-lock.integration` and the web `athlete-conflict.spec` |
+| A deployment fails after a database schema change | Forward-only, backward-compatible migrations run before the deploy, so rollback is the previous image: [`docs/05-deployment.md`](./docs/05-deployment.md#when-a-deployment-fails-after-a-schema-change) |
+| A technology adds operational complexity without a clear business benefit | The list of what was refused, each with its reason: [`docs/04-scalability-reliability.md`](./docs/04-scalability-reliability.md#what-we-deliberately-did-not-do-and-why) |
+
+---
+
 ## Architecture
 
 ```mermaid
@@ -697,7 +724,7 @@ Each one exists to make a specific claim falsifiable.
 
 ### Four findings from actually running this
 
-The first version of the isolation suite **passed while reading across tenants.**
+**1. The first version of the isolation suite passed while reading across tenants.**
 
 `ALTER TABLE ... FORCE ROW LEVEL SECURITY` subjects the table *owner* to its policies,
 but a **superuser — or any role with `BYPASSRLS` — ignores row-level security entirely**,
@@ -763,8 +790,9 @@ Scope choices, each one a decision rather than an omission:
   script, and in a browser: the web register keeps its marks and their ids on the
   device, and a submission whose answer was lost is repeated without storing anything
   twice.
-- **Full CRUD across all entities.** Coaches, assessments and scheduling exist in the
-  schema and the proposal, not in the API surface. Six shallow modules would prove less
+- **Full CRUD across all entities.** Coaches and assessments exist in the schema and the
+  proposal, not in the API surface, and a scheduled session can be created and read but
+  not edited or cancelled. Six shallow modules would prove less
   than one slice that carries every hard guarantee.
 - **Account management beyond signing in.** Sessions are real
   ([better-auth](https://www.better-auth.com), httpOnly cookies, rows in this Postgres,
