@@ -175,7 +175,9 @@ test('a coach marks a register on a phone, across a reload and a failed submissi
   await page.getByRole('button', { name: 'Account menu' }).click();
   await page.getByRole('menuitem', { name: 'Sign out' }).click();
   await expect(page).toHaveURL(/\/sign-in$/);
-  expect(await draftCount(page)).toBe(0);
+  // Sign-out leaves for sign-in first and forgets the drafts after, so the address
+  // changes a moment before they are gone.
+  await expect.poll(() => draftCount(page)).toBe(0);
 });
 
 test.describe('scheduling', () => {
