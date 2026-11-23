@@ -1,14 +1,9 @@
 import { hashKey, type QueryClient, type QueryKey } from '@tanstack/react-query';
-
-/**
- * Every draft kept in local storage lives under this prefix (the attendance register's
- * drafts arrive in phase 5), so "all drafts" is a definition and not a list to maintain.
- */
-export const DRAFT_KEY_PREFIX = 'athlete:draft:';
+import { clearDrafts } from './drafts';
 
 /**
  * Forgets everything this browser holds about the signed-in person and their academy:
- * every cached API answer and every local draft.
+ * every cached API answer and every local draft (`./drafts`).
  *
  * Called on sign-out, on an academy switch and on a 401. All three mean "what is cached
  * was fetched as someone, or somewhere, else": showing it for even one frame would put
@@ -28,18 +23,4 @@ export function resetSession(queryClient: QueryClient, options: { keep?: QueryKe
     queryClient.clear();
   }
   clearDrafts();
-}
-
-function clearDrafts(): void {
-  try {
-    const keys: string[] = [];
-    for (let index = 0; index < window.localStorage.length; index += 1) {
-      const key = window.localStorage.key(index);
-      if (key?.startsWith(DRAFT_KEY_PREFIX)) keys.push(key);
-    }
-    for (const key of keys) window.localStorage.removeItem(key);
-  } catch {
-    // Storage can be unavailable (private mode, a blocked cookie jar). There is then
-    // no draft to clear, and a reset must never fail on its way to sign-in.
-  }
 }

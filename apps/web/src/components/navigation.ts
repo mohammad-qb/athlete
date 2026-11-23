@@ -1,5 +1,5 @@
 import type { PermissionAction, Subject } from '@athlete/contracts';
-import { type Icon, IconShirtSport, IconUsers } from '@tabler/icons-react';
+import { type Icon, IconCalendarEvent, IconShirtSport, IconUsers } from '@tabler/icons-react';
 import type { LinkProps } from '@tanstack/react-router';
 
 export interface NavigationItem {
@@ -13,8 +13,7 @@ export interface NavigationItem {
 /**
  * The whole menu. One app for every role: an entry is shown when the signed-in user
  * holds its permission in the active academy, so the same person sees a different
- * menu in an academy where they hold a different role. Sessions join this list with
- * their screens.
+ * menu in an academy where they hold a different role.
  */
 export const NAVIGATION: readonly NavigationItem[] = [
   {
@@ -28,5 +27,11 @@ export const NAVIGATION: readonly NavigationItem[] = [
     to: '/teams',
     icon: IconShirtSport,
     requires: { action: 'read', subject: 'teams' },
+  },
+  {
+    title: 'Sessions',
+    to: '/sessions',
+    icon: IconCalendarEvent,
+    requires: { action: 'read', subject: 'trainingSessions' },
   },
 ];

@@ -67,3 +67,57 @@ export function endOfDay(date: string): string {
 export function startOfNextDay(date: string): string {
   return localDay(date, 'nextStart');
 }
+
+const CLOCK_TIME = /^(\d{2}):(\d{2})$/;
+
+/** The calendar date `days` after (or, negative, before) another, as a date input's value. */
+export function addDays(date: string, days: number): string {
+  const match = CALENDAR_DATE.exec(date);
+  if (!match) return date;
+  const [, year, month, day] = match;
+  return today(new Date(Number(year), Number(month) - 1, Number(day) + days));
+}
+
+/**
+ * The instant a clock time on a day names, in the browser's zone: a date input and a
+ * time input, as the API's instant. Empty when either is empty, so the schema reports
+ * it as missing; anything else unreadable is passed on for the schema to refuse.
+ */
+export function atLocalTime(date: string, time: string): string {
+  if (!date || !time) return '';
+  const day = CALENDAR_DATE.exec(date);
+  const clock = CLOCK_TIME.exec(time);
+  if (!day || !clock) return `${date}T${time}`;
+  const instant = new Date(
+    Number(day[1]),
+    Number(day[2]) - 1,
+    Number(day[3]),
+    Number(clock[1]),
+    Number(clock[2]),
+  );
+  return Number.isNaN(instant.getTime()) ? `${date}T${time}` : instant.toISOString();
+}
+
+// An instant is shown where the person is: a session "at 17:00" is 17:00 on the wall
+// of whoever reads it. (`formatDate` above is for days and uses no zone on purpose.)
+const dateTimeFormat = new Intl.DateTimeFormat('en-GB', {
+  weekday: 'short',
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+const timeFormat = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit' });
+
+/** An instant as a day and a clock time in the browser's zone: `Mon 2 Mar 2026, 17:00`. */
+export function formatDateTime(instant: string): string {
+  const parsed = new Date(instant);
+  return Number.isNaN(parsed.getTime()) ? instant : dateTimeFormat.format(parsed).replace(',', '');
+}
+
+/** An instant as a clock time in the browser's zone: `18:30`. */
+export function formatTime(instant: string): string {
+  const parsed = new Date(instant);
+  return Number.isNaN(parsed.getTime()) ? instant : timeFormat.format(parsed);
+}

@@ -11,10 +11,17 @@ test.use({ storageState: STATE.coach });
 test('a coach sees their athletes and teams, without the controls their role excludes', async ({
   page,
 }) => {
+  // `/` sends a coach to their sessions (an administrator goes to the athletes list).
+  await page.goto('/');
+  await expect(page).toHaveURL(/\/sessions$/);
+  // A coach schedules sessions for their own teams, so that control IS drawn.
+  await expect(page.getByRole('button', { name: 'New session' })).toBeVisible();
+
   await page.goto('/athletes');
   const menu = page.getByRole('list', { name: 'Main' });
   await expect(menu.getByRole('link', { name: 'Athletes' })).toBeVisible();
   await expect(menu.getByRole('link', { name: 'Teams' })).toBeVisible();
+  await expect(menu.getByRole('link', { name: 'Sessions' })).toBeVisible();
 
   // The list is drawn (the coach's own team's athletes), with no way to add to it.
   await expect(page.getByRole('link', { name: /Falcon/ })).toBeVisible();

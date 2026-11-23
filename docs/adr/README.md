@@ -3,7 +3,8 @@
 One record per decision that would otherwise have to be re-derived from the code. Each
 says what was decided, what it was decided against, and what it costs. The proposal in
 [`docs/`](../) argues the design as a whole; these are the decisions made while
-hardening the vertical slice, in the order they were made.
+hardening the vertical slice and then building the web client on it, in the order they
+were made.
 
 | # | Decision | Status |
 |---|---|---|
@@ -13,6 +14,8 @@ hardening the vertical slice, in the order they were made.
 | [0004](./0004-privilege-matrix-and-voiding.md) | A database privilege matrix, and voiding instead of deleting | Accepted |
 | [0005](./0005-terraform-privilege-split.md) | Terraform split by who applies it; a deploy identity that cannot touch IAM | Accepted — never applied |
 | [0006](./0006-cookie-sessions-and-the-auth-role.md) | Cookie sessions as database rows; better-auth on its own database role | Accepted |
+| [0007](./0007-generated-contract-pipeline.md) | One contract generated outwards: Zod, then OpenAPI, then the typed client | Accepted |
+| [0008](./0008-web-architecture.md) | The web client: thin routes, enforced features, a policy that stays on the server | Accepted |
 
 Two decisions of the same period are argued in the proposal itself rather than here:
 validation on by default

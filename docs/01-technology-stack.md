@@ -15,7 +15,7 @@
 | Repository | **pnpm workspaces + Turborepo** | Shared Zod contracts between API and SPA; cached CI tasks; nothing exotic to defend |
 | Database | **PostgreSQL 17** | RLS, GiST exclusion constraints over `tstzrange`, JSONB — three features this domain needs |
 | Data access | **Drizzle ORM** | SQL-first; migrations are editable `.sql`, which the guarantees require |
-| API | **REST + OpenAPI generated from Zod** | Readable without running it; `ETag`/`Idempotency-Key` are native; integrations free |
+| API | **REST + OpenAPI generated from Zod** | Readable without running it; `ETag`/`If-Match` are native; integrations free |
 | Client | **React + Vite SPA, static** | Keeps production at ONE Node process |
 | Auth | **better-auth, self-hosted, own Postgres** | Identity PII stays in the UAE; flat cost |
 | Authorization | **CASL ability + a small condition→SQL compiler** | One policy gates routes and filters queries; see [02](./02-architecture.md) |
@@ -124,13 +124,27 @@ transparency.
 ## 5. API style — REST + OpenAPI generated from the Zod contracts
 
 **Why.** The panel can read a spec without running it; `ETag`/`If-Match` (the
-optimistic-concurrency answer) and `Idempotency-Key` (the offline-write answer) are
-native REST mechanics rather than bolt-ons; responses are cacheable at the edge; and a
-future academy integration costs nothing. Type safety is preserved because the client is
-generated from the same Zod schemas the server validates with.
+optimistic-concurrency answer) is a native REST mechanic rather than a bolt-on;
+responses are cacheable at the edge; and a future academy integration costs nothing.
+Type safety is preserved because the client is generated from the same Zod schemas the
+server validates with.
+
+**What is built.** The whole chain, with nothing written twice
+([ADR 0007](./adr/0007-generated-contract-pipeline.md)). Every route declares the
+schemas of its input and of its response; [`apps/api/openapi.json`](../apps/api/openapi.json)
+is generated from those declarations by walking the real module graph, committed, and a
+unit test fails when it is stale; the SPA's typed client and its TanStack Query options
+are generated from that document by hey-api, committed, and CI fails when they are
+stale. The SPA's forms validate with the Zod schemas themselves.
+
+One correction to earlier drafts, which named an `Idempotency-Key` header as the
+retried-write answer: the API has no such header. A retried attendance submission is
+made safe in the body, by a client-generated `clientRecordId` on each entry that is
+unique per academy ([03 §3](./03-data-model.md)), which the contract can type and the
+database can enforce.
 
 **tRPC** — best DX for a TS monorepo and the fastest path to a working app. Rejected
-because there is no language-agnostic contract, and `ETag`/idempotency semantics sit
+because there is no language-agnostic contract, and `ETag`/`If-Match` semantics sit
 awkwardly on an RPC-shaped transport.
 
 **GraphQL** — attractive for dashboard screens that need athletes, sessions and
@@ -150,19 +164,25 @@ there is no SEO requirement and no public page, so SSR would buy nothing concret
 **Next.js** — better DX and the obvious default. Rejected because no benefit it delivers
 *for an authenticated dashboard* justifies a second deployable.
 
-Responsive web covers phones. Native mobile is deferred with a documented Expo path that
-reuses `packages/contracts`.
+Responsive web covers phones: the coach's attendance register is built for a 390px
+screen and tested at that width. Native mobile is deferred with a documented Expo path
+that reuses `packages/contracts`.
 
 **What is built.** `apps/web` is that SPA: React 19, Vite, TanStack Router, Query, Table
-and Form, shadcn/ui. So far it holds the foundation every screen reuses (the generated
-client, one error mapper, permissions read from `GET /me`, a server-driven list table,
-form fields that take the server's validation messages, one conflict dialog for a
-refused stale write) and the administrator's screens: sign in, change password, athletes
-(list, add, edit) and teams (list, create, roster as of a day, add, transfer). Sessions
-and the attendance register are not built yet. Its structure is enforced like the API's: thin
-routes over features that may not import each other, checked by dependency-cruiser. In
-the compose stack an nginx container serves the bundle and proxies `/api`, reproducing
-the single origin Front Door provides; it is a local stand-in, not a second deployable.
+and Form, shadcn/ui. One application for an academy administrator and a coach, covering
+everything the API offers: sign in and change password; athletes (list, add, edit, with
+one conflict dialog for a refused stale write); teams (list, create, roster as of a day,
+add, transfer); sessions (list, schedule) and the attendance register, which is marked
+into a draft kept on the device and submitted once, so a reload or a failed request
+loses nothing and a retry stores nothing twice. Under the screens sits what each of them
+reuses: the generated client, one error mapper, permissions read from `GET /me` (the
+policy itself never leaves the server), a server-driven list table, and form fields that
+take the server's validation messages. Its structure is enforced like the API's: thin
+routes over features that may not import each other, checked by dependency-cruiser
+([ADR 0008](./adr/0008-web-architecture.md)). In the compose stack an nginx container
+serves the bundle and proxies `/api`, reproducing the single origin Front Door provides;
+it is a local stand-in, not a second deployable. Not built: an offline queue (a
+submission needs a connection), and screens for an athlete or a platform administrator.
 See [`apps/web/README.md`](../apps/web/README.md).
 
 ## 7. Authentication — better-auth, users in our own Postgres

@@ -78,7 +78,7 @@ flowchart TB
     repo --> pg
     contracts -.-> browser
     contracts -.-> ctl
-    future -.->|idempotency-key| fd
+    future -.->|client record ids| fd
 
     classDef dim fill:#f6f6f6,stroke:#bbb,color:#555
     class future dim
@@ -382,8 +382,13 @@ With the stack up, migrated and seeded (`./scripts/seed-dev.sh`, below), open
 `both@alpha.test` (two academies: the one to try the academy switcher with). The `web`
 service is nginx serving the built SPA and proxying `/api` to the API, so the browser
 sees one origin, as it does behind Front Door. To develop it, run the API on the host
-with `pnpm dev` and the SPA with `pnpm dev:web` (Vite on :5173, proxying `/api`). What is
-built so far, and how it is put together: [`apps/web/README.md`](./apps/web/README.md).
+with `pnpm dev` and the SPA with `pnpm dev:web` (Vite on :5173, proxying `/api`).
+
+An administrator lands on the athletes list and a coach on their sessions; the same
+application, with the menu and the controls the signed-in person's permissions allow.
+To see the coach's flow, sign in as `coach@alpha.test` (on a phone-sized window, if you
+like), create a session for Team A, open it and mark the register. What is built, and
+how it is put together: [`apps/web/README.md`](./apps/web/README.md).
 
 ### Sign in
 
@@ -418,30 +423,31 @@ database role of its own, and why the browser cannot choose its academy:
 
 ### Verified state of this repository
 
-Run on 22 November 2026, in this order, on macOS, Node 24.14.1, pnpm 11.21.0, Docker
-28.3.2, `postgres:17-alpine`. Turborepo's cache was bypassed (`--force`) and the compose
-stack was started on a fresh volume:
+Run on 23 November 2026, on macOS, Node 24.14.1, pnpm 11.21.0, Docker 28.3.2,
+`postgres:17-alpine`. Turborepo's cache was bypassed (`--force`) and the compose stack
+was started on a fresh volume (with `POSTGRES_PORT=55432`, port 5432 being taken on the
+machine):
 
 ```
 pnpm install --frozen-lockfile              ✓ lockfile unchanged
 pnpm run build                              ✓ 4 tasks (the SPA bundle included)
 pnpm run typecheck                          ✓ no errors (6 tasks)
 pnpm run lint                               ✓ no errors (7 tasks, type-aware)
-pnpm run lint:boundaries                    ✓ no violations (API: 82 modules, 185 dependencies;
-                                              SPA: 100 modules, 224 dependencies)
+pnpm run lint:boundaries                    ✓ no violations (API: 82 modules, 187 dependencies;
+                                              SPA: 116 modules, 285 dependencies)
 test (unit + route coverage + HTTP)         ✓ 315 passed (18 files)
-web test (Vitest, jsdom)                    ✓ 118 passed (16 files)
+web test (Vitest, jsdom)                    ✓ 166 passed (21 files)
 test:integration (real Postgres)            ✓ 135 passed (10 files)
 web generate + git diff --exit-code         ✓ openapi.json and the generated client unchanged
 docker compose up --build                   ✓ the api and web images build
 docker compose run migrate                  ✓ Applied: 0000_init.sql, 0001_rls.sql, 0002_grants.sql, 0003_auth.sql
-./scripts/smoke.sh (containerised stack)    ✓ 97/97 checks passed
-web test:e2e (Playwright, same stack)       ✓ 20 passed
+./scripts/smoke.sh (containerised stack)    ✓ 111/111 checks passed
+web test:e2e (Playwright, same stack)       ✓ 25 passed
 ```
 
-Smoke before end-to-end, as above: the end-to-end setup adds athletes to Alpha Academy
-so the list has a second page, and three of the smoke checks count Alpha's athletes
-from a fresh seed. CI runs the two in separate jobs, each on its own stack.
+Smoke before end-to-end, as above: the end-to-end suite adds athletes and teams to
+Alpha Academy, and four of the smoke checks read Alpha's athletes and teams as a fresh
+seed leaves them. CI runs the two in separate jobs, each on its own stack.
 
 The smoke run, verbatim, from that fresh volume. Every request after the first block
 carries a session cookie obtained by signing in over HTTP; "academy B sees an empty
@@ -530,6 +536,22 @@ Teams and sessions (lists, and reads by id for deep links)
   PASS  a period filter is half-open [from, to)      0
   PASS  sessions have nothing to search: q is 400    400
 
+Attendance (a register is recorded facts; a replayed submission is a no-op)
+  PASS  a new register is empty                      0
+  PASS  the coach records attendance                 201
+  PASS  the register holds the entry                 1 late bus
+  PASS  a replay of the same id is accepted          201
+  PASS  ...and changes nothing                       1 late bus
+  PASS  ...answering with the stored register        1 late
+  PASS  the same athlete under a new id is 409       409
+  PASS  ...typed attendance_already_recorded         attendance_already_recorded
+  PASS  an athlete who was not on the team is 400    400
+  PASS  ...typed athlete_not_on_team                 athlete_not_on_team
+  PASS  the register still holds one entry           1
+  PASS  another academy cannot read the register     404
+  PASS  a session ending before it starts is 400     400
+  PASS  ...typed session_time_invalid                session_time_invalid
+
 Responses (declared, and encoded through the declaration)
   PASS  a create answers 201                         201
   PASS  switching academy answers 200, as declared   200
@@ -576,8 +598,8 @@ Signing out (the row is deleted, so a copied cookie is worth nothing)
 All smoke checks passed.
 ```
 
-The script is re-runnable: a second run against the same volume also passes 97/97, with
-a higher integer on the ETag line. It takes about half a minute, most of it spent
+The script is re-runnable: a second run against the same volume also passes 111/111,
+with a higher integer on the ETag line. It takes about half a minute, most of it spent
 waiting out the sign-in rate limit it then asserts.
 
 Every failure has the same shape, because a client should be able to write one error
@@ -645,7 +667,7 @@ Each one exists to make a specific claim falsifiable.
 |---|---|---|
 | `tenancy.isolation.integration` | Connects as a **`NOBYPASSRLS` non-owner role**, then: an academy sees only its own athletes; no tenant context returns **zero** rows (fails closed); inserting into another academy is refused; **referencing** another academy's team is refused by a composite FK; cross-tenant role lookup exists only behind one audited `SECURITY DEFINER` function | "prevent unauthorized access between academies" |
 | `temporal.membership.integration` | Overlapping periods in the same team rejected; concurrent membership of *different* teams allowed; back-to-back periods permitted (`[)` bounds); inverted periods rejected; "who was on this team in March" answered from the period | "maintaining historical records" |
-| `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted — by the application role (no privilege) or by the owner (`RESTRICT`); a replayed offline submission inserts nothing | "maintaining historical records when athletes change teams" |
+| `history.transfer.integration` | Record attendance → transfer the athlete → **February's register and roster are unchanged**; an athlete with history cannot be deleted — by the application role (no privilege) or by the owner (`RESTRICT`); a replayed offline submission inserts nothing (and over HTTP, in `scripts/smoke.sh`: a replay answers with the stored register, and the same athlete under a new id is a typed 409) | "maintaining historical records when athletes change teams" |
 | `concurrency.optimistic-lock.integration` | Two writers hold version 0; the first wins, the second affects **zero rows** → 409, and the first writer's change survives; no row lock is held across user think-time | "two users update the same record simultaneously" |
 | `authz.route-coverage` | Walks the real module graph and fails if **any** route does not carry exactly one of `@Permission`, `@Authenticated` and `@Public`; every declared `(action, subject)` is in the shared vocabulary and every subject is claimed by a route or explicitly reserved; the public allowlist is asserted explicitly; the committed [route manifest](docs/reference/route-manifest.md), with paths as served under `/api/v1`, must match the code. The same walk covers responses: every route declares `@Responds`, an `ETag` is only promised on a versioned body, and a route that requires `If-Match` returns the new version. And validation: no handler binds `@Body`, `@Param` or `@Query`; every part of the request a handler reads, every body-taking method and every path parameter has a declared schema; and every declared schema refuses an unknown key | "secure access based on user roles and responsibilities" |
 | `authz.ability.unit` | One CASL ability definition is the whole policy: grants per role; the operations each route demanded before are held by exactly the roles those routes listed; the coarse (guard) and scoped (query) modes agree on which operations exist, and scoped never grants what the guard refuses; a coach with no active assignment gets **no rule**, not a rule over an empty list | "secure access based on user roles and responsibilities" |
@@ -667,6 +689,9 @@ Each one exists to make a specific claim falsifiable.
 | `auth.owner.integration` | Migrated by an owner that is **not a superuser** (the production arrangement, and the one no other suite has): the operator CLI still creates accounts, and the cross-tenant lookup still returns a user's academies. It returned nothing before `0003`, which every superuser-migrated suite passed straight over | — |
 | `origin.guard.unit` | A state-changing request naming another origin (another scheme, port, subdomain, or `null`) is refused with `invalid_origin`; the application's origin and a request with no `Origin` pass; a GET is never refused | — |
 | `me.unit` | `/me` lists exactly the `(action, subject)` pairs the coarse ability grants, by asking it rather than restating it; never the `manage` wildcard; nothing without a principal; switching to an academy the user is not in is a 403 that writes nothing | — |
+| web `drafts`, `register`, `attendance-page` (Vitest) | The attendance register's draft: a mark and its `clientRecordId` survive a reload, the id is made once per athlete and never replaced, a failed submission keeps the draft and **the retry sends the same ids**, success and a session reset delete it, unusable storage is tolerated; only athletes with no stored entry are ever sent | "maintaining historical records" |
+| web e2e `attendance.spec` (Playwright, 390px) | Against the real stack: a coach signs in, lands on sessions, marks half a register, reloads and finds the marks, marks the rest; **the first submission reaches the API and its answer is dropped, the retry stores nothing twice** (one entry per athlete, read back from the API); signing out removes an unfinished draft | — |
+| web e2e `athlete-conflict.spec` (Playwright) | Two browsers edit one athlete; the second meets the conflict dialog and resolves it both ways | "two users update the same record simultaneously" |
 | `api-error.unit` | Every error type maps to the status and log severity the contract promises, the type list is exhaustive (adding one without a status fails here), and `toJSON` cannot serialise `cause` | — |
 | `error-responder.unit` | One log line per failure at its own severity; `meta` logged for 5xx and withheld for 4xx; an unexpected error is redacted to `"Internal server error"` while the **whole cause chain** reaches the log, bounded and cycle-guarded; a 5xx `HttpException` is redacted the same way, payload and all, so choosing a status is not a claim the message is publishable; a 4xx `HttpException` publishes its message and **nothing else** of its payload; an `http-errors` 4xx keeps its status only when it marked itself exposable; a response already begun is closed rather than crashed | — |
 
@@ -733,8 +758,11 @@ Scope choices, each one a decision rather than an omission:
   SPA is stock shadcn/ui (`dashboard-01`, light theme only) with no custom design work.
 - **Native mobile.** Out of scope — but the real-world gap is named: coaches mark
   attendance pitch-side on poor connectivity. The write API is therefore already
-  idempotent (client-generated UUIDs + `Idempotency-Key`), so offline sync becomes a
-  feature rather than a rewrite. Proven by the replay test.
+  idempotent (a client-generated id on every attendance entry), so offline sync becomes
+  a feature rather than a rewrite. Proven by the replay test, over HTTP by the smoke
+  script, and in a browser: the web register keeps its marks and their ids on the
+  device, and a submission whose answer was lost is repeated without storing anything
+  twice.
 - **Full CRUD across all entities.** Coaches, assessments and scheduling exist in the
   schema and the proposal, not in the API surface. Six shallow modules would prove less
   than one slice that carries every hard guarantee.
@@ -750,13 +778,19 @@ Scope choices, each one a decision rather than an omission:
   works and is tested at the database, as the application role; no route does it. The
   rule that a departed coach keeps the assessments they authored is designed and has
   no route to apply to.
-- **The coach's screens of the web application.** `apps/web` is a working SPA on the
-  typed client generated from [`apps/api/openapi.json`](./apps/api/openapi.json): sign in,
-  sign out, change password, the shell with a role-aware menu and an academy switcher,
-  athletes (list, add, edit, with a dialog that resolves an edit conflict) and teams
-  (list, create, roster as of a day, add an athlete, transfer). Sessions and the
-  attendance register are not built yet
+- **Offline attendance, and anything in the web application beyond the API.**
+  `apps/web` is a working SPA on the typed client generated from
+  [`apps/api/openapi.json`](./apps/api/openapi.json), and it covers what the API offers
+  to an academy administrator and a coach: sign in, sign out, change password, the shell
+  with a role-aware menu and an academy switcher, athletes (list, add, edit, with a
+  dialog that resolves an edit conflict), teams (list, create, roster as of a day, add
+  an athlete, transfer), sessions (list, schedule) and the attendance register on a
+  phone. It stops where the API stops and one step short of offline: a register is
+  submitted over a connection (there is no queue and no service worker), a recorded
+  entry cannot be corrected (no void route), and there are no screens for an athlete, a
+  platform administrator, users or roles
   ([`apps/web/README.md`](./apps/web/README.md),
+  [ADR 0008](./docs/adr/0008-web-architecture.md),
   [`docs/plans/frontend-v1.md`](./docs/plans/frontend-v1.md)).
 - **Backup cron, restore drill and backup-absence alerts.** Marked `STUB` in
   `infra/terraform/stacks/<env>/base/backup.tf`. Front Door and private networking for
@@ -785,7 +819,7 @@ apps/
     test/               unit + Testcontainers integration
     src/openapi/        the route walk and the OpenAPI generator
     openapi.json        GENERATED from the contracts and route metadata; committed
-  web/                  React + Vite SPA: shell, sign-in, athletes and teams (sessions to come)
+  web/                  React + Vite SPA: sign-in, athletes, teams, sessions and attendance
     src/routes/         thin route files: search schema, guard, loader
     src/features/       one folder per feature, public through index.ts only
     src/components/     shared composites; ui/ holds the shadcn primitives
@@ -800,7 +834,7 @@ infra/terraform/        Azure UAE North / UAE Central
   modules/              container-app, postgres, static-site, edge
   stacks/               shared (CI identity, state) · <env>/base (human-applied) · <env>/app (CI-applied)
 docs/                   the written proposal (A–E of the brief)
-  adr/                  decision records for the hardening work
+  adr/                  decision records: the hardening work, then the web client
   reference/            the generated route manifest
   plans/                the phase-by-phase build record, deviations included
 scripts/                smoke check, demo data, dev accounts

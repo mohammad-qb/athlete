@@ -1,5 +1,13 @@
 # Frontend v1: cookie auth, a generated API client, and the admin + coach SPA
 
+> **Status: complete (2026-11-23).** All five phases are done. This document is kept as
+> the record of why the phases exist, what each one found, and where it deviated. The
+> lasting decisions now live in [`docs/adr/`](../adr/README.md) (0006 to 0008) and in the
+> proposal itself (`docs/01`–`06`); read those and
+> [`apps/web/README.md`](../../apps/web/README.md) for what the system does, and this
+> for how it got there. What is left open for the owner is listed under
+> [phase 5's deviations](#deviations-4).
+
 **Goal.** When this plan is done, `apps/web` is a React + Vite static SPA that an
 `academy_admin` and a `coach` sign in to and use for everything the API offers today:
 athletes (list, create, edit with conflict handling), teams (list, roster, memberships,
@@ -23,10 +31,11 @@ default scrypt stays), no second deployable beyond static files.
 | 2 | API contract (response schemas, lists, new reads, OpenAPI, generated client) | done |
 | 3 | Web foundation (shell, design system, sign-in, athletes list, e2e harness) | done |
 | 4 | Admin screens (athlete create/edit + conflict dialog, teams) | done |
-| 5 | Coach flow (sessions, phone attendance) + docs | not started |
+| 5 | Coach flow (sessions, phone attendance) + docs | done |
 
-**Current phase:** 4 done (2026-11-23, branch `feat/frontend-v1-phase-4`).
-**Recommended next phase:** 5 (coach flow: sessions, phone attendance, docs).
+**Current phase:** 5 done (2026-11-23, branch `feat/frontend-v1-phase-5`). The plan is complete.
+**Recommended next phase:** none. Follow-ups that are not part of this plan are listed
+under phase 5's deviations.
 
 Phases are strictly sequential. Stop after phase 3 for the owner to look at the running UI
 before building more screens on it.
@@ -918,11 +927,11 @@ the code.
 
 ### Tasks
 
-- [ ] Sessions list and create
-- [ ] Attendance register, drafts, submit and retry behaviour
-- [ ] Coach landing and navigation
-- [ ] Unit tests and the Playwright attendance spec at phone width
-- [ ] Docs, ADRs, plan marked complete
+- [x] Sessions list and create
+- [x] Attendance register, drafts, submit and retry behaviour
+- [x] Coach landing and navigation
+- [x] Unit tests and the Playwright attendance spec at phone width
+- [x] Docs, ADRs, plan marked complete
 
 ### Tests
 
@@ -942,4 +951,71 @@ docs/01-technology-stack.md apps/web/README.md` returns nothing that is now fals
 
 ### Deviations
 
-_None yet._
+- **The API changed, which this phase did not plan** (as in phase 4, and for the same
+  reason). Three rules the database enforces on session writes failed in the driver and
+  came back as a redacted 500. `SessionsService` now answers them as typed refusals: the
+  same athlete recorded under a second `clientRecordId` (another device, not a retry) is
+  409 `attendance_already_recorded`; a session that ends before it starts is 400
+  `session_time_invalid`; and the existing "not a member at the session's start" refusal
+  gained a code (`athlete_not_on_team`) and a message without raw ids. No route, schema
+  or status set changed, so `openapi.json` and the generated client are untouched.
+- **A partly replayed submission answers with the stored register.** It used to do so
+  only when *nothing* was new, and otherwise returned just the rows it inserted, which
+  a client could mistake for the register.
+- **Attendance had no check over HTTP at all.** The replay was proven at the SQL level
+  only (`history.transfer.integration`). The plan's "integration, if not already
+  covered" became 14 `smoke.sh` checks (111 in all), since Vitest cannot construct the
+  real controllers: record, replay (a no-op that answers with what is stored, even when
+  the replay claims another status), the two refusals above, another academy's 404,
+  and the backwards session.
+- **All four statuses are offered** (present, late, absent, excused): the values of
+  `AttendanceStatus`. The plan's sentence names three.
+- **The register is submitted whole.** The button is enabled once every athlete still
+  to record has a status ("mark everyone, submit once"), and a **Mark rest present**
+  button, which the plan does not mention, fills in whoever is left.
+- **The entries the API answers with go on screen before the draft is deleted**, so a
+  submitted athlete is never drawn as unmarked; the refetch that follows is a check.
+  A mark for an athlete the API already holds (a lost answer, then a reload) is
+  dropped from the draft when the register loads.
+- **A 409 `attendance_already_recorded` reloads the register** and keeps the marks of
+  the athletes still to record. The plan did not consider two devices.
+- **A `clientRecordId` is made when an athlete is first touched** (a status or a note),
+  and without `crypto.randomUUID` where the page is not a secure context (a phone on a
+  development machine's LAN address), using `getRandomValues`.
+- **`DRAFT_KEY_PREFIX` and the clearing of drafts moved to `lib/drafts.ts`**;
+  `session-reset.ts` calls it. When local storage cannot be written the marks live in
+  the page and the register says so.
+- **"Upcoming and recent" is everything from 14 days ago**, the list's default view;
+  `?show=all` drops the bound. The bound is not in the URL. There is no team filter.
+  A session carries only its team's id, so each row reads its team by id (one request
+  per distinct team on the page, through the query cache).
+- **A session is one day with a start and an end on the clock**, entered in the
+  browser's zone and created in a dialog; a session that runs past midnight cannot be
+  entered there, though the API accepts one, and such a session is shown with its end
+  day as well as its end time. Session times are shown in the browser's zone (`formatDateTime`), where
+  `formatDate` shows a day without one.
+- **The landing rule moved the two-academy end-to-end test**: in Alpha that person is a
+  coach with no team and now lands on `/sessions`, where the API refuses the list.
+- **End-to-end beyond the spec the plan lists.** `attendance.spec.ts` also schedules a
+  session as the coach (the picker offers their own team only; an end before the start
+  is refused in the form) and opens an address that names no session. `shell.spec.ts`
+  takes the sessions list, the new-session dialog and a register at both widths. The
+  "forced network failure" lets the first submission **reach the API** and drops its
+  answer, which is the case a retry can get wrong; the spec then reads the register
+  back from the API and counts one entry per athlete.
+- **Files the plan did not name:** `features/sessions/register.ts` (who is recorded,
+  who is pending, the request), `session-requests.ts`, `hooks/use-attendance-draft.ts`,
+  `components/{attendance-row,create-session-dialog}.tsx`; `addDays`, `atLocalTime`,
+  `formatDateTime` and `formatTime` in `lib/dates.ts`.
+- **Docs corrected in this phase:** `README.md` (the web app, what is not built, test
+  table, layout, verified state and the recorded smoke run), `apps/web/README.md`,
+  `docs/01` §5 and §6, `docs/03` §3 (the session refusals), `docs/06` (decisions 21 and
+  22, offline, next steps), and two new records,
+  [ADR 0007](../adr/0007-generated-contract-pipeline.md) and
+  [ADR 0008](../adr/0008-web-architecture.md). The `Idempotency-Key` header that
+  `docs/01`, `docs/06` and the README named, and the API never had, is gone from all
+  three (carried over from phase 2).
+- **Left for the owner, not part of this plan:** correcting a recorded entry (voiding
+  works at the database and has no route); an offline queue; whether a register may be
+  submitted in part; a team filter on the sessions list, and team names on
+  `GET /sessions` (which would save the list its per-team reads).

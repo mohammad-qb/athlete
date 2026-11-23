@@ -1,6 +1,7 @@
 import { QueryClient } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
-import { DRAFT_KEY_PREFIX, resetSession } from './session-reset';
+import { DRAFT_KEY_PREFIX } from './drafts';
+import { resetSession } from './session-reset';
 
 describe('resetSession', () => {
   it('drops every cached API answer', () => {

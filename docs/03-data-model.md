@@ -267,6 +267,18 @@ in-flight writer.
 `client_record_id`, unique per academy, with `ON CONFLICT DO NOTHING`. A retried or
 late-syncing offline submission is a no-op rather than a duplicate register entry —
 which is what lets a future offline mobile client ship without redesigning this endpoint.
+The web client already relies on it: the register keeps each athlete's id with their
+mark on the device, so a submission repeated after a failure, a lost answer or a reload
+sends the same ids. A replay answers with the stored register, so the client converges
+on what the server holds.
+
+A *different* id for an athlete who already has an entry is not a retry but a second
+device, and the partial unique index (one active entry per athlete per session) refuses
+it. `SessionsService` answers that as a 409 `attendance_already_recorded`, an athlete
+who was not on the team at the session's start as a 400 `athlete_not_on_team`, and a
+session that ends before it starts as a 400 `session_time_invalid`, instead of the
+redacted 500 a failed constraint would otherwise be. `scripts/smoke.sh` asserts each,
+and that a replay and a refusal both leave the register as it was.
 
 ## 4. API design
 

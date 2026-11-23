@@ -1,7 +1,14 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
-import { BOTH, expectNoHorizontalScroll, PASSWORD, SEED, STATE } from './support';
+import {
+  BOTH,
+  createSession,
+  expectNoHorizontalScroll,
+  PASSWORD,
+  SEED,
+  STATE,
+} from './support';
 
 const SHOTS = path.join(import.meta.dirname, 'screenshots');
 const VIEWPORTS = [
@@ -61,6 +68,42 @@ for (const viewport of VIEWPORTS) {
           animations: 'disabled',
         });
       });
+
+      test('the sessions list, a register and the new-session dialog fit the screen', async ({
+        page,
+        baseURL,
+      }) => {
+        // A session of the seeded team, starting now: its register has the seeded athlete.
+        const start = new Date(Math.floor(Date.now() / 1000) * 1000);
+        const session = await createSession(page.request, baseURL!, {
+          teamId: SEED.teamA,
+          startsAt: start.toISOString(),
+          endsAt: new Date(start.getTime() + 90 * 60_000).toISOString(),
+          location: 'Main pitch',
+        });
+
+        await page.goto('/sessions');
+        await expect(page.locator(`a[href$="/sessions/${session.id}/attendance"]`)).toBeVisible();
+        await page.evaluate(() => document.fonts.ready);
+        await expectNoHorizontalScroll(page);
+        await page.screenshot({ path: path.join(SHOTS, `sessions-${viewport.name}.png`) });
+
+        await page.getByRole('button', { name: 'New session' }).click();
+        await expect(page.getByRole('dialog')).toBeVisible();
+        await expect(page.getByRole('option').first()).toBeVisible();
+        await expectNoHorizontalScroll(page);
+        await page.screenshot({
+          path: path.join(SHOTS, `session-new-${viewport.name}.png`),
+          animations: 'disabled',
+        });
+        await page.getByRole('button', { name: 'Cancel' }).click();
+
+        await page.goto(`/sessions/${session.id}/attendance`);
+        await expect(page.getByTestId('register-progress')).toBeVisible();
+        await page.getByRole('radio', { name: 'Present' }).first().check();
+        await expectNoHorizontalScroll(page);
+        await page.screenshot({ path: path.join(SHOTS, `register-${viewport.name}.png`) });
+      });
     });
   });
 }
@@ -87,7 +130,9 @@ test.describe('someone who belongs to two academies', () => {
       // The menu animates shut; the next round must open a new one, not catch this one.
       await expect(page.getByRole('menu')).toHaveCount(0);
       await expect(academy).toContainText(target);
-      await expect(page).toHaveURL(/\/athletes$/);
+      // The landing page is chosen again for the role held THERE: an administrator's
+      // athletes in Beta, a coach's sessions in Alpha.
+      await expect(page).toHaveURL(target === 'Beta Academy' ? /\/athletes$/ : /\/sessions$/);
       // The page is redrawn for the new academy, never left showing the previous one.
       // In Beta this person is an administrator of an academy with no athletes; in
       // Alpha, a coach with no team, whom the API refuses the list.
